@@ -192,7 +192,7 @@ def pruneModel(my_model, max_distance, limitR):
     # enforce maximal distance
     if max_distance is not None:
         print("   - enforce maximal distance of transfer integrals")
-        acceptedHoppings = np.zeros(len(my_model._hoppings), dtype=np.bool8)
+        acceptedHoppings = np.zeros(len(my_model._hoppings), dtype=np.bool)
         unitcell = np.array(my_model.get_lat())
         for i, (ti, destination, origin, vec) in enumerate(my_model._hoppings):
             ham = np.abs(ti)
@@ -203,7 +203,7 @@ def pruneModel(my_model, max_distance, limitR):
             if dist <= max_distance:
                 acceptedHoppings[i] = True
 
-        my_model._hoppings = np.array(my_model._hoppings)
+        my_model._hoppings = np.array(my_model._hoppings, dtype=object)
         my_model._hoppings = my_model._hoppings[acceptedHoppings]
     else:
         print("   - skip maximal distance of transfer integrals")
@@ -212,12 +212,12 @@ def pruneModel(my_model, max_distance, limitR):
     # enforce limit R
     if limitR is not None:
         print("   - enforce R limit.")
-        acceptedHoppings = np.zeros(len(my_model._hoppings), dtype=np.bool8)
+        acceptedHoppings = np.zeros(len(my_model._hoppings), dtype=np.bool)
         for i, (ti, destination, origin, vec) in enumerate(my_model._hoppings):
             if abs(vec[0]) <= limitR[0] and abs(vec[1]) <= limitR[1] and abs(vec[2]) <= limitR[2]:
                 acceptedHoppings[i] = True
 
-        my_model._hoppings = np.array(my_model._hoppings)
+        my_model._hoppings = np.array(my_model._hoppings, dtype=object)
         my_model._hoppings = my_model._hoppings[acceptedHoppings]
     else:
         print("   - skip R limit.")
@@ -416,7 +416,7 @@ if __name__=="__main__":
     print("   - valence states")
     val_model = pruneModel(val_model, args.max_distance, args.limitR)
     print("   - conduction states")
-    pruneModel(cond_model, args.max_distance, args.limitR)
+    cond_model = pruneModel(cond_model, args.max_distance, args.limitR)
 
     print("[+] Clean up TB-model.")
     print("   - valence states")
