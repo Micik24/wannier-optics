@@ -26,12 +26,12 @@ Generate configuration files for you...
 [+] Write configuration file input.ini
 [+] Write plan file CUSTOM
 Path to valence Wannier functions? w90_calculations/valence_band
-wannier90 seedname for valence WF? [default=wannier90] 
+wannier90 seedname for valence WF? [default=wannier90]
 [+] Write vmapping.txt
 	1 --> w90_calculations/valence_band/wannier90_00001.xsf
 	...
 Path to conduction Wannier functions? w90_calculations/conduction_band
-wannier90 seedname for conduction WF? [default=wannier90] 
+wannier90 seedname for conduction WF? [default=wannier90]
 [+] Write cmapping.txt
 	1 --> w90_calculations/conduction_band/wannier90_00001.xsf
 	...
@@ -134,6 +134,7 @@ For this we use the python script `wo-tight-binding.py`, that can be used as a c
 ```bash
 python wo-tight-binding.py -h
 ```
+*Hint: Make sure you have installed and activated the virtual environment by running `cd path/to/python-scripts/ && uv sync && source .venv/bin/activate && cd -`*
 
 The script determines the location of the `wannier90` calculations by reading the `vmapping.txt` and `cmapping.txt`. It extracts the tight-binding model from `wannier90_hr.dat`, and `wannier90_wsvec.dat`.
 Furthermore, it will determine if some Wannier functions got shifted by comparing `POSFILE` and `wannier90_centres.xyz` and would apply the same shift to the tight binding model such that Coulomb integrals and tight-binding models are consistent.

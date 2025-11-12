@@ -17,7 +17,7 @@ All calculations use MPI and can run massively parallelized on high performance 
 
 On Ubuntu/Debian you need to install:
 ```bash
-sudo apt install cmake libfftw3-dev build-essential mpi-default-dev
+sudo apt install cmake libfftw3-dev build-essential mpi-default-dev libxcb-cursor0
 
 # for testing (optional):
 sudo apt install libgtest-dev
@@ -32,6 +32,26 @@ sudo apt install doxygen graphviz
 # make documentation:
 doxygen doc_config
 ```
+
+### Virtual environment for python scripts
+For some pre- and post-processing we use python scripts that are loaced under `python-scripts/`. To ensure an optimal user experience we recommend to use the package manager `uv` (https://docs.astral.sh/uv/). It can be installed using
+```bash
+pip install uv
+```
+To install all required python packages run:
+```bash
+cd python-scripts/
+uv sync
+```
+This will create a virtual environment, which can be activated by
+```bash
+source .venv/bin/activate
+```
+and deactivated using
+```bash
+deactivate
+```
+
 
 
 # Usage

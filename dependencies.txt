@@ -3,6 +3,7 @@ cmake
 pkg-config
 mpi-default-dev
 libfftw3-dev
+libxcb-cursor0
 libgtest-dev
 doxygen
 graphviz
