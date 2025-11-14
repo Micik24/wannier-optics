@@ -334,36 +334,63 @@ bool tryToShareMeshgrid( map<int, WannierFunction>& vWannMap, map<int, WannierFu
 }
 
 /**
- * @brief Creates a WannierFunction object in a larger supercell
+ * @brief Creates a padding for a Wannier function (WF) by creating a larger supercell.
  *
- * An existing Wannier function is placed in a larger supercell. New values
- * are filled with zeros (padding). This can be important for FFTs of Wannier
- * functions.
+ * An existing WF is placed in a larger supercell. New values are filled with zeros (padding).
+ * This can be important for FFTs of WF as it may reduce aliacing errors. The resulting WF is
+ * centeredin in new supercell, i.e. the padding is on all sides. This ensures that we don't
+ * get problems with routines that assume that the position of the WF is in the center
+ * (e.g. when calculation MAX_ALLOWED_DIST).
+ *
+ * This routine only creates LARGER supercells. If the specified supercell is small than
+ * the original supercell we would return the original and NOT PRUNE anything. No information
+ * is lost (only padding)!
  *
  * @param wann    Wannier function in a smaller supercell. This will be overwritten.
- * @param supercellDim  Dimensions of the new supercell in units of the old supercell
+ * @param supercellDim  Dimensions of the new supercell
  * @return void
  */
 void createLargerSupercell(WannierFunction& wann, vector<int> supercellDim)
 {
+    assert(supercellDim.size() == 3);
+    const vector<double> oldSupercell = wann.getLatticeInUnitcellBasis();
 
-    if ((supercellDim[0] <= 1) && (supercellDim[1] <= 1) && (supercellDim[2] <= 1))
+    // skip if the proposed supercell is smaller than what we already have (in all directions)
+    if ((supercellDim[0] <= oldSupercell[0]) && (supercellDim[1] <= oldSupercell[1]) && (supercellDim[2] <= oldSupercell[2]))
     {
         return;
     }
 
+    // The new supercell might be smaller in some directions and larger in other directions than the old supercell
+    // In this case we need to make sure that in every direction the new supercell has at least the same size than
+    // the old supercell.
+    if (supercellDim[0] < oldSupercell[0]) {
+        supercellDim[0] = round(oldSupercell[0]);
+    }
+    if (supercellDim[1] < oldSupercell[1]) {
+        supercellDim[1] = round(oldSupercell[1]);
+    }
+    if (supercellDim[2] < oldSupercell[2]) {
+        supercellDim[2] = round(oldSupercell[2]);
+    }
+
     const RealMeshgrid* oldMeshgrid = wann.getMeshgrid();
-    // vector<vector<double>> unitcell = wann.getUnitcell();
-    vector<vector<double>> old_lattice = oldMeshgrid->getLattice();
     vector<int> oldDim = oldMeshgrid->getDim();
+
+    // determine number of grid points per unit cell
+    vector<int> Ngrid_unitcell(3);
+    Ngrid_unitcell[0] = round(oldDim[0]/oldSupercell[0]);
+    Ngrid_unitcell[1] = round(oldDim[1]/oldSupercell[1]);
+    Ngrid_unitcell[2] = round(oldDim[2]/oldSupercell[2]);
 
     // get new dimensions (number of grid points)
     vector<int> newDim(3);
-    newDim[0] = oldMeshgrid->getDim()[0] * supercellDim[0];
-    newDim[1] = oldMeshgrid->getDim()[1] * supercellDim[1];
-    newDim[2] = oldMeshgrid->getDim()[2] * supercellDim[2];
+    newDim[0] = Ngrid_unitcell[0] * supercellDim[0];
+    newDim[1] = Ngrid_unitcell[1] * supercellDim[1];
+    newDim[2] = Ngrid_unitcell[2] * supercellDim[2];
 
     // calculate new (larger) lattice of the supercell (not unitcell!)
+    vector<vector<double>> old_lattice = oldMeshgrid->getLattice();
     vector<vector<double>> new_lattice(3);
     for (int i = 0; i < 3; i++)
     {
@@ -374,28 +401,53 @@ void createLargerSupercell(WannierFunction& wann, vector<int> supercellDim)
         }
     }
 
-    shared_ptr<RealMeshgrid> newMeshgrid = make_shared<RealMeshgrid>(newDim, new_lattice, wann.getMeshgrid()->getOrigin());
+    // calculate origin of the new supercell
+    vector<double> oldOrigin = wann.getMeshgrid()->getOrigin();
+
+    vector<int> cellsBeforeData {
+        int(round(supercellDim[0]-oldSupercell[0]))/2,
+        int(round(supercellDim[1]-oldSupercell[1]))/2,
+        int(round(supercellDim[2]-oldSupercell[2]))/2
+    };
+
+    vector<vector<double>> unitcell = wann.getUnitcell();
+    auto shift = matVecMul3x3(transpose3x3(unitcell),cellsBeforeData);
+    vector<double> newOrigin{
+        oldOrigin[0] - shift[0],
+        oldOrigin[1] - shift[1],
+        oldOrigin[2] - shift[2]
+    };
+
+    vector<int> offset{  // of gridpoints
+        cellsBeforeData[0] * Ngrid_unitcell[0],
+        cellsBeforeData[1] * Ngrid_unitcell[1],
+        cellsBeforeData[2] * Ngrid_unitcell[2]
+    };
+
+    // create new meshgrid object for new supercell
+    shared_ptr<RealMeshgrid> newMeshgrid = make_shared<RealMeshgrid>(newDim, new_lattice, newOrigin);
 
     // generate new data array
-    double *data = (double *)malloc(sizeof(double) * newMeshgrid->getNumDataPoints());
+    int N_new = newMeshgrid->getNumDataPoints();
+    double *data = (double *)malloc(sizeof(double) * N_new);
+    for (int i=0; i<N_new; i++) {
+        data[i] = 0.0;
+    }
+
+
     double const* olddata = wann.getValue();
     printf("Create supercell with %d threads\n", omp_get_max_threads());
-    #pragma omp parallel for shared(data, olddata, newDim, oldDim)
-    for (int k = 0; k < newDim[2]; k++)
-    { // z
-        for (int j = 0; j < newDim[1]; j++)
-        { // y
-            for (int i = 0; i < newDim[0]; i++)
-            { // x
-
-                if ((i < oldDim[0]) && (j < oldDim[1]) && (k < oldDim[2]))
-                {
-                    data[i + newDim[0] * (j + newDim[1] * k)] = olddata[i + oldDim[0] * (j + oldDim[1] * k)];
-                }
-                else
-                {
-                    data[i + newDim[0] * (j + newDim[1] * k)] = 0;
-                }
+    #pragma omp parallel for shared(data, olddata, newMeshgrid, oldMeshgrid, offset, oldDim)
+    for (int k = 0; k < oldDim[2]; k++)  // z
+    {
+        int k_new = offset[2] + k;
+        for (int j = 0; j < oldDim[1]; j++)  // y
+        {
+            int j_new = offset[1] + j;
+            for (int i = 0; i < oldDim[0]; i++)  // x
+            {
+                int i_new = offset[0] + i;
+                data[ newMeshgrid->getGlobId(i_new, j_new, k_new) ] = olddata[ oldMeshgrid->getGlobId(i,j,k) ];
             }
         }
     }

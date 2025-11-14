@@ -72,7 +72,7 @@ TEST(WannierfunctionTest, LatticeSupercell2) {
 
 TEST(WannierfunctionTest, CreateSupercell) {
 
-    vector<int> dim{100,61,82};
+    vector<int> dim{90,60,82};
     vector<double> origin{-16.577331, -28.712780, 0.0};
 
     vector< vector<double> > unitcell(3);
@@ -94,7 +94,7 @@ TEST(WannierfunctionTest, CreateSupercell) {
     wann_supercell.setUnitcell(unitcell);
 
     ASSERT_NE(wann0.getValue(), wann_supercell.getValue());  // check that its not the identical object
-    createLargerSupercell(wann_supercell, vector<int>{2, 2, 2});
+    createLargerSupercell(wann_supercell, vector<int>{6, 6, 2});
 
     // XSF_controller::save_file("wann0.xsf",wann0);
     // XSF_controller::save_file("wann_supercell.xsf",wann_supercell);
@@ -112,16 +112,24 @@ TEST(WannierfunctionTest, CreateSupercell) {
     // test meshgrid and unitcell
     for (int i=0; i<3; i++) {
         ASSERT_EQ(wann0.getMeshgrid()->getDim()[i]*2, wann_supercell.getMeshgrid()->getDim()[i]);
-        ASSERT_EQ(wann0.getMeshgrid()->getOrigin()[i], wann_supercell.getMeshgrid()->getOrigin()[i]);
         for (int j=0; j<3; j++) {
             ASSERT_EQ(wann0.getUnitcell()[i][j], wann_supercell.getUnitcell()[i][j]);
         }
     }
+    EXPECT_NEAR(wann_supercell.getMeshgrid()->getOrigin()[0], -24.820203, 1e-10);
+    EXPECT_NEAR(wann_supercell.getMeshgrid()->getOrigin()[1], -42.989853, 1e-10);
+    EXPECT_NEAR(wann_supercell.getMeshgrid()->getOrigin()[2], 0.0, 1e-10);
+
     EXPECT_NEAR(wann0.getMeshgrid()->getdV(), wann_supercell.getMeshgrid()->getdV(), 1e-10);
     EXPECT_NEAR(wann0.getMeshgrid()->getVgrid()*8, wann_supercell.getMeshgrid()->getVgrid(), 1e-10);
 
     //wann_supercell->getMeshgrid()->setupCoordinates();
     double x,y,z, x2,y2,z2;
+    vector<double> shift {
+        wann0.getMeshgrid()->getOrigin()[0] - wann_supercell.getMeshgrid()->getOrigin()[0],
+        wann0.getMeshgrid()->getOrigin()[1] - wann_supercell.getMeshgrid()->getOrigin()[1],
+        wann0.getMeshgrid()->getOrigin()[2] - wann_supercell.getMeshgrid()->getOrigin()[2],
+    };
     for (int k=0; k<wann_supercell.getMeshgrid()->getDim()[2]; k++) {  // z
         for (int j=0; j<wann_supercell.getMeshgrid()->getDim()[1]; j++) {  // y
             for (int i=0; i<wann_supercell.getMeshgrid()->getDim()[0]; i++) {  // x
@@ -129,9 +137,9 @@ TEST(WannierfunctionTest, CreateSupercell) {
                 if ((i<wann0.getMeshgrid()->getDim()[0]) && (j<wann0.getMeshgrid()->getDim()[1]) && (k<wann0.getMeshgrid()->getDim()[2])) {
                     wann0.getMeshgrid()->xyz(i + dim[0]*( j + dim[1]*k ),x,y,z);
                     wann_supercell.getMeshgrid()->xyz(i + wann_supercell.getMeshgrid()->getDim()[0]*( j + wann_supercell.getMeshgrid()->getDim()[1]*k ), x2,y2,z2);
-                    ASSERT_NEAR(x, x2, 1e-10);
-                    ASSERT_NEAR(y, y2, 1e-10);
-                    ASSERT_NEAR(z, z2, 1e-10);
+                    ASSERT_NEAR(x, x2+shift[0], 1e-10);
+                    ASSERT_NEAR(y, y2+shift[1], 1e-10);
+                    ASSERT_NEAR(z, z2+shift[2], 1e-10);
                 }
             }
         }

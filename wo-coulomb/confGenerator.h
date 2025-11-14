@@ -144,8 +144,7 @@ NUM_OMP_THREADS = 1\n\
 # Supercell dimensions for Fourier-space calculations (applies only to\n\
 # Coulomb integrals). Helps prevent aliasing in Fourier space but should\n\
 # only be adjusted if necessary, as larger values significantly increase\n\
-# computation time. A supercell >1 is incompatible with calculations other\n\
-# than Coulomb integrals.\n\
+# computation time.\n\
 SUPERCELL_DIM_X = 1\n\
 SUPERCELL_DIM_Y = 1\n\
 SUPERCELL_DIM_Z = 1\n\
