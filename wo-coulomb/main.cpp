@@ -9,6 +9,7 @@
 #include "filehandler.h"
 #include "scheduler.h"
 #include "parallel_computation.h"
+#include "utils.h"
 
 #include <iostream>
 #include <iomanip>
@@ -700,6 +701,15 @@ int main(int argc, char *argv[]) {
         cout << "    Integrals beyond this limit are skipped to avoid aliasing errors.\n";
         cout << "    To support larger distances, increase the supercell through wannier90\n";
         cout << "    or using SUPERCELL_DIM_* in the config file.\n\n";
+
+        if (MAX_ALLOWED_DISTANCE < 6) {
+            string warning_msg = "MAX_ALLOWED_DISTANCE seems to be quite small.\n"\
+                "The maximally allowed distance of 2-center integrals in your supercell is very small. Please make sure\n"\
+                "that your supercell is large enough for converged calculations.\n"\
+                "The maximal allowed distance is (approx.) the maximal radius of a sphere that completely fits into the supercell.\n\n"\
+                "MAX_ALLOWED_DISTANCE             = " + to_string(MAX_ALLOWED_DISTANCE) + " Angström\n";
+            runtime_warning(warning_msg);
+        }
 
         cout << "Write POSFILE.\n";
         writePOSFILE("POSFILE", unitcell, pos_c, pos_v, CRYSTAL_PERIODIC);

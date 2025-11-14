@@ -11,6 +11,7 @@
 #include "coulombIntegral.h"
 #include "filehandler.h"
 #include "density.h"
+#include "utils.h"
 
 #include <vector>
 #include <list>
@@ -565,25 +566,25 @@ public:
 
         // open Coulomb file if exits
         if (!filesystem::exists(coulomb_file)) {
-            cerr << "Cannot open file: " << coulomb_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + coulomb_file + " because it does not exist!");
             return false;
         }
         cout << "Read previous calculated integrals from " << coulomb_file << endl;
         auto f = CoulombFileReader(coulomb_file);
         if (! f.wasSuccessful()) {
-            cerr << "Cannot read integrals from file.\n";
+            runtime_warning("Cannot read integrals from file.");
             return false;
         }
         const vector<Integral>& integrals = f.getElements();
 
         if (!filesystem::exists(state_file)) {
-            cerr << "Cannot open file: " << state_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + state_file + " because it does not exist!");
             return false;
         }
 
         ifstream file(state_file);
         if (!file.is_open()) {
-            cerr << "Cannot open file: " << state_file << endl;
+            runtime_warning("Cannot open file: " + state_file);
             file.close();
             return false;
         }
@@ -591,7 +592,7 @@ public:
         string line;
         getline(file, line);
         if (line != "FixedListScheduler") {
-            cerr << "Cannot load state of the scheduler of type " << line << " (should be FixedListScheduler)\n";
+            runtime_warning("Cannot load state of the scheduler of type " + line + " (should be FixedListScheduler)");
             file.close();
             return false;
         }
@@ -602,7 +603,7 @@ public:
         getline(file, line);  // curser and plan.size()
         vector<string> v = splitBySpacesAndTabs(line);//split(line, string("\t"));
         if (v.size() != 2) {
-            cerr << "Cannot load state of the scheduler: 2 arguments required but "<< v.size() << " are given.\n";
+            runtime_warning("Cannot load state of the scheduler: 2 arguments required but "+  to_string(v.size()) + " are given.");
             file.close();
             return false;
         }
@@ -612,7 +613,7 @@ public:
 
         getline(file, line);
         if (line != "Plan:") {
-            cerr << "Error while parsing plan in restart file (cannot find keyword)\n";
+            runtime_warning("Error while parsing plan in restart file (cannot find keyword)");
             file.close();
             return false;
         }
@@ -623,7 +624,7 @@ public:
 
             vector<string> v = splitBySpacesAndTabs(line); //split(line, string("\t"));
             if (v.size() < 13) {
-                cerr << "Error while parsing plan in restart file\n";
+                runtime_warning("Error while parsing plan in restart file");
                 file.close();
                 return false;
             }
@@ -635,7 +636,7 @@ public:
         // read solved ints
         getline(file, line);
         if (line != "Solved integrals:") {
-            cerr << "Error while parsing solved integrals (cannot find keyword)\n";
+            runtime_warning("Error while parsing solved integrals (cannot find keyword)");
             file.close();
             return false;
         }
@@ -645,7 +646,7 @@ public:
         file.close();
 
         if (Num_ints != int(integrals.size())) {
-            cerr << "Cannot load state of the scheduler: Expected "<< Num_ints << " calculated integrals but found " << integrals.size() << ".\n";
+            runtime_warning("Cannot load state of the scheduler: Expected " + to_string(Num_ints) + " calculated integrals but found " + to_string(integrals.size()) + ".");
             return false;
         }
 
@@ -1163,32 +1164,32 @@ public:
 
         // open Coulomb file if exits
         if (!filesystem::exists(coulomb_file)) {
-            cerr << "Cannot open file: " << coulomb_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + coulomb_file + " because it does not exist!");
             return false;
         }
         cout << "Read previous calculated integrals from " << coulomb_file << endl;
         auto f = CoulombFileReader(coulomb_file);
         if (! f.wasSuccessful()) {
-            cerr << "Cannot read integrals from file.\n";
+            runtime_warning("Cannot read integrals from file.");
             return false;
         }
         const vector<Integral>& integrals = f.getElements();
 
         if (!filesystem::exists(state_file)) {
-            cerr << "Cannot open file: " << state_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + state_file + " because it does not exist!");
             return false;
         }
 
         ifstream file(state_file);
         if (!file.is_open()) {
-            cerr << "Cannot open file: " << state_file << endl;
+            runtime_warning("Cannot open file: " + state_file);
             return false;
         }
 
         string line;
         getline(file, line);
         if (line != "CoulombScheduler") {
-            cerr << "Cannot load state of the scheduler of type " << line << " (should be CoulombScheduler)\n";
+            runtime_warning("Cannot load state of the scheduler of type " + line +" (should be CoulombScheduler)");
             file.close();
             return false;
         }
@@ -1199,7 +1200,7 @@ public:
         // read tubles
         getline(file, line);
         if (line != "Tuples:") {
-            cerr << "Error while parsing tuples (cannot find keyword)\n";
+            runtime_warning("Error while parsing tuples (cannot find keyword)");
             file.close();
             return false;
         }
@@ -1208,7 +1209,7 @@ public:
             getline(file, line);
             vector<string> v = splitBySpacesAndTabs(line);//split(line, string("\t"));
             if (v.size() != 10) {
-                cerr << "Error while parsing tuples\n";
+                runtime_warning("Error while parsing tuples");
                 file.close();
                 return false;
             }
@@ -1221,7 +1222,7 @@ public:
         // read cursers
         getline(file, line);
         if (line != "Cursers:") {
-            cerr << "Error while parsing cursers (cannot find keyword)\n";
+            runtime_warning("Error while parsing cursers (cannot find keyword)");
             file.close();
             return false;
         }
@@ -1230,7 +1231,7 @@ public:
             getline(file, line);
             vector<string> v = splitBySpacesAndTabs(line); //split(line, string("\t"));
             if (v.size() != 2) {
-                cerr << "Error while parsing cursers\n";
+                runtime_warning("Error while parsing cursers");
                 file.close();
                 return false;
             }
@@ -1240,7 +1241,7 @@ public:
         // read solved ints
         getline(file, line);
         if (line != "Solved integrals:") {
-            cerr << "Error while parsing solved integrals (cannot find keyword)\n";
+            runtime_warning("Error while parsing solved integrals (cannot find keyword)");
             file.close();
             return false;
         }
@@ -1250,7 +1251,7 @@ public:
         file.close();
 
         if (Num_ints != int(integrals.size())) {
-            cerr << "Cannot load state of the scheduler: Expected "<< Num_ints << " calculated integrals but found " << integrals.size() << ".\n";
+            runtime_warning("Cannot load state of the scheduler: Expected " + to_string(Num_ints) + " calculated integrals but found " + to_string(integrals.size()) + ".");
             return false;
         }
 
@@ -1366,20 +1367,14 @@ public:
     double getMaxDist() const override
     {
         if (maxDistance > MAX_ALLOWED_DISTANCE) {
-            cerr << "\n\n-------------------------------------------------------------\n\n";
-            cerr << "▗▖ ▗▖ ▗▄▖ ▗▄▄▖ ▗▖  ▗▖▗▄▄▄▖▗▖  ▗▖ ▗▄▄▖\n";
-            cerr << "▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▛▚▖▐▌  █  ▐▛▚▖▐▌▐▌   \n";
-            cerr << "▐▌ ▐▌▐▛▀▜▌▐▛▀▚▖▐▌ ▝▜▌  █  ▐▌ ▝▜▌▐▌▝▜▌\n";
-            cerr << "▐▙█▟▌▐▌ ▐▌▐▌ ▐▌▐▌  ▐▌▗▄█▄▖▐▌  ▐▌▝▚▄▞▘\n";
-            cerr << "\n";
-            cerr << "Maximum electron-hole distance reached before meeting the\n";
-            cerr << "MONOPOLE_RELATIVE_ERROR_THRESHOLD criterion.\n";
-            cerr << "Density-density integrals may be incomplete.\n";
-            cerr << "To resolve this, increase the supercell size (SUPERCELL_DIM_* in the config file)\n";
-            cerr << "or adjust the DIFF_MONO_THRESHOLD value.\n\n";
-            cerr << "MAX_ALLOWED_DISTANCE = "<< MAX_ALLOWED_DISTANCE << " Angström" << endl;
-            cerr << "current distance     = " << maxDistance << " Angström" << endl;
-            cerr << "\n\n-------------------------------------------------------------\n";
+            string warning_msg = "Maximum allowed electron-hole distance reached before meeting the\n"\
+                "MONOPOLE_RELATIVE_ERROR_THRESHOLD criterion.\n"\
+                "Density-density integrals may be incomplete.\n"\
+                "To resolve this, increase the supercell size (SUPERCELL_DIM_* in the config file)\n"\
+                "or adjust the DIFF_MONO_THRESHOLD value.\n\n"\
+                "MAX_ALLOWED_DISTANCE = " + to_string(MAX_ALLOWED_DISTANCE) + " Angström\n"\
+                "current distance     = " + to_string(maxDistance) + " Angström\n";
+            runtime_warning(warning_msg);
         }
 
         return min(maxDistance, MAX_ALLOWED_DISTANCE);
@@ -1509,13 +1504,13 @@ public:
     bool loadState(string restart_file, string coulomb_file) override {
 
         if (!filesystem::exists(restart_file)) {
-            cerr << "Cannot open file: " << restart_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + restart_file + " because it does not exist!");
             return false;
         }
 
         ifstream file(restart_file);
         if (!file.is_open()) {
-            cerr << "Cannot open file: " << restart_file << endl;
+            runtime_warning("Cannot open file: " + restart_file);
             file.close();
             return false;
         }
@@ -1540,7 +1535,7 @@ public:
             cout << "Try to load first phase of the scheduler.\n";
             return firstPhase->loadState(restart_file, coulomb_file);
         }else {
-            cerr << "Cannot load state form restart file.\n";
+            runtime_warning("Cannot load state form restart file.");
             return false;
         }
     }
@@ -2027,32 +2022,32 @@ public:
 
         // open Coulomb file if exits
         if (!filesystem::exists(coulomb_file)) {
-            cerr << "Cannot open file: " << coulomb_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + coulomb_file + " because it does not exist!");
             return false;
         }
         cout << "Read previous calculated integrals from " << coulomb_file << endl;
         auto f = CoulombFileReader(coulomb_file);
         if (! f.wasSuccessful()) {
-            cerr << "Cannot read integrals from file.\n";
+            runtime_warning("Cannot read integrals from file.");
             return false;
         }
         const vector<Integral>& integrals = f.getElements();
 
         if (!filesystem::exists(state_file)) {
-            cerr << "Cannot open file: " << state_file << " because it does not exist!"<< endl;
+            runtime_warning("Cannot open file: " + state_file + " because it does not exist!");
             return false;
         }
 
         ifstream file(state_file);
         if (!file.is_open()) {
-            cerr << "Cannot open file: " << state_file << endl;
+            runtime_warning("Cannot open file: " + state_file);
             return false;
         }
 
         string line;
         getline(file, line);
         if (line != "LocalFieldEffectsScheduler") {
-            cerr << "Cannot load state of the scheduler of type " << line << " (should be LocalFieldEffectsScheduler)\n";
+            runtime_warning("Cannot load state of the scheduler of type " + line + " (should be LocalFieldEffectsScheduler)");
             file.close();
             return false;
         }
@@ -2063,7 +2058,7 @@ public:
         // read tuples
         getline(file, line);
         if (line != "Tuples:") {
-            cerr << "Error while parsing tuples (cannot find keyword)\n";
+            runtime_warning("Error while parsing tuples (cannot find keyword)");
             file.close();
             return false;
         }
@@ -2072,7 +2067,7 @@ public:
             getline(file, line);
             vector<string> v = splitBySpacesAndTabs(line); //split(line, string("\t"));
             if (v.size() != 5) {
-                cerr << "Error while parsing tuples\n";
+                runtime_warning("Error while parsing tuples");
                 file.close();
                 return false;
             }
@@ -2082,7 +2077,7 @@ public:
         // read cursers
         getline(file, line);
         if (line != "Cursers:") {
-            cerr << "Error while parsing cursers (cannot find keyword)\n";
+            runtime_warning("Error while parsing cursers (cannot find keyword)");
             file.close();
             return false;
         }
@@ -2095,7 +2090,7 @@ public:
         // read solved ints
         getline(file, line);
         if (line != "Solved integrals:") {
-            cerr << "Error while parsing solved integrals (cannot find keyword)\n";
+            runtime_warning("Error while parsing solved integrals (cannot find keyword)");
             file.close();
             return false;
         }
@@ -2105,7 +2100,7 @@ public:
         file.close();
 
         if (Num_ints != int(integrals.size())) {
-            cerr << "Cannot load state of the scheduler: Expected "<< Num_ints << " calculated integrals but found " << integrals.size() << ".\n";
+            runtime_warning("Cannot load state of the scheduler: Expected "+ to_string(Num_ints) + " calculated integrals but found " + to_string(integrals.size()) + ".");
             return false;
         }
 
