@@ -649,6 +649,20 @@ int main(int argc, char *argv[]) {
     shared_ptr<RealMeshgrid> mesh = cWannMap.begin()->second.getSharedMeshgridPtr();
     if (rank==0) cout << "The meshgrid is used " << mesh.use_count() << " times." << endl;
 
+
+    // if (rank==0) {  // only for debugging
+    //     // write xsf files for visual inspection
+    //     cout << "Write xsf files for visual inspection in " << DATA_DIR << "\n";
+    //     for (const auto& itr : vWannMap) {
+    //         string filename = DATA_DIR / ("valence_wannier_" + to_string(itr.first) + ".xsf");
+    //         XSF_controller::save_file(filename, itr.second);
+    //     }
+    //     for (const auto& itr : cWannMap) {
+    //         string filename = DATA_DIR / ("conduction_wannier_" + to_string(itr.first) + ".xsf");
+    //         XSF_controller::save_file(filename, itr.second);
+    //     }
+    // }
+
     /**
      *  Preparation steps for meshgrids, Wannier functions, centers and shells
      **/
@@ -704,9 +718,10 @@ int main(int argc, char *argv[]) {
 
         if (MAX_ALLOWED_DISTANCE < 6) {
             string warning_msg = "MAX_ALLOWED_DISTANCE seems to be quite small.\n"\
-                "The maximally allowed distance of 2-center integrals in your supercell is very small. Please make sure\n"\
-                "that your supercell is large enough for converged calculations.\n"\
-                "The maximal allowed distance is (approx.) the maximal radius of a sphere that completely fits into the supercell.\n\n"\
+                "The maximally allowed distance of 2-center integrals in your supercell is very small.\n"\
+                "Please make sure that your supercell is large enough for converged calculations.\n"\
+                "The maximal allowed distance is (approx.) the maximal radius of a sphere that completely\n"\
+                "fits into the supercell.\n\n"\
                 "MAX_ALLOWED_DISTANCE             = " + to_string(MAX_ALLOWED_DISTANCE) + " Angström\n";
             runtime_warning(warning_msg);
         }
