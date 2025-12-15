@@ -5,7 +5,7 @@
  * @file potential.h
  * @author Konrad Merkel
  * @brief Potentials that can be used within Coulomb integrals.
- * 
+ *
  */
 
 #include <cmath>
@@ -16,17 +16,17 @@ using namespace std;
 
 /**
  * @brief Potential that can be used in the Coulomb integrals to calculate the interaction.
- * 
+ *
  * All potentials depend on the distance (not on actual coordinates!!!). Potentials could also
  * depend on parameters.
- * 
+ *
  */
 class Potential
 {
 private:
     /**
      * @brief Name of the potential (e.g. Coulomb, Yukawa,...)
-     * 
+     *
      * This name will be used in all output files and for std-output.
      * The name may contain used parameters of the potential.
      */
@@ -38,7 +38,7 @@ public:
 
     /**
      * @brief Value of the potential function given a real space distance
-     * 
+     *
      * @param r     real space distance
      */
     virtual double inline real(double r) const = 0;
@@ -46,7 +46,7 @@ public:
 
     /**
      * @brief Value of the potential function given a reciprocal space distance
-     * 
+     *
      * @param q     reciprocal space distance
      */
     virtual double inline fourier(double q) const = 0;
@@ -58,7 +58,7 @@ public:
 
 /**
  * @brief 3D unscreened Coulomb potential
- * 
+ *
  */
 class CoulombPotential: public Potential
 {
@@ -71,7 +71,7 @@ public:
 
 /**
  * @brief 3D Yukawa potential
- * 
+ *
  */
 class YukawaPotential : public Potential
 {
@@ -88,7 +88,6 @@ public:
     static inline double calc_yukawa_screening_factor(double mean_density, double epsilon, double alpha) {
 
         // general physical constants
-        //const double HBAR = 65.82119569;      // reduced Planck constant in eV*fs
         const double aB = 0.52917721090380;   // Bohr radius in Angström
 
         // dimensionless electron gas paramter (from yellium model; see Bechstedt 2015)
@@ -123,7 +122,7 @@ public:
 
 /**
  * @brief 3D isotropic Gauss function as potential
- * 
+ *
  * This is mainly for debugging purposes.
  */
 class GaussPotential : public Potential

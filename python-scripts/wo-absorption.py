@@ -16,7 +16,7 @@ import argparse, os
 import configparser
 matplotlib.rcParams["savefig.directory"] = os.path.dirname(os.getcwd())
 
-HBAR = 65.82119569  # reduced Planck constant in eV*fs
+HBAR = 0.6582119569  # reduced Planck constant in eV*fs
 ARB_TO_EV = 14.39964535 # e^2/(4pi epsilon_0) in eV*Angström
 
 def dir_path(string):

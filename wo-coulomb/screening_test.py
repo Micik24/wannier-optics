@@ -380,7 +380,6 @@ if __name__=="__main__":
     # print("total density:", total_density)
 
     # general physical constants
-    HBAR = 65.82119569      # reduced Planck constant in eV*fs
     aB = 0.52917721090380   # bohr radius in angström
 
     density = 0.265361608
