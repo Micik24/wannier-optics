@@ -12,7 +12,7 @@ module Hamiltonian
 
     implicit none
     PRIVATE
-        
+
     PUBLIC create_exciton_hamiltonian, estimate_num_neighbors
     contains
 
@@ -123,7 +123,7 @@ module Hamiltonian
         call MPI_BARRIER(MPI_COMM_WORLD,ierr)
         if (ierr /= 0) STOP "Error in MPI_BARRIER"
 
-        
+
         do cell=p_id,num_cells, psize  ! parallel go over all cells of the test supercell, each mpi process gets a separate cell
 
             ! We cannot use the usual getExcitonIndex functions because use a different supercell.
@@ -136,7 +136,7 @@ module Hamiltonian
             Sz1 = Sz1 - test_supercell(3)
             Sy1 = Sy1 - test_supercell(2)
             Sx1 = Sx1 - test_supercell(1)
-            
+
             do c1=1,get_N_con()
                 do v1=1,get_N_val()
 
@@ -297,11 +297,11 @@ module Hamiltonian
 
             ! check duplicates in COULOMB and LOCALFIELDEFFECTS file
             if (config%CHECK_DUPLICATES) THEN
-            write(*,*) "Check for duplicates in COULOMB file"            
+            write(*,*) "Check for duplicates in COULOMB file"
             filename = "COULOMB"
             call check_duplicates_COULOMB(p_id, filename)
 
-            write(*,*) "Check for duplicates in LOCALFIELDEFFECTS file" 
+            write(*,*) "Check for duplicates in LOCALFIELDEFFECTS file"
             filename = "LOCALFIELDEFFECTS"
             call check_duplicates_COULOMB(p_id, filename)
             endif
@@ -368,7 +368,7 @@ module Hamiltonian
             enList(cadd) = enList(cadd) - onsite_energies_o(v1) / gamma ! minus sign because of exciton hamiltonian
 
 
-            !---------- set (single particle) transfer integrals in the hamiltonian --------------  
+            !---------- set (single particle) transfer integrals in the hamiltonian --------------
             nbar=0
             do ia=1,numTI  ! go over all neighbors (in NNMAP)
 
@@ -399,7 +399,7 @@ module Hamiltonian
                     traList(cadd,nbar)=TIsingle(c1,v1,c2,v2, Sx2-Sx1, Sy2-Sy1, Sz2-Sz1)
 
 
-                    !---------- set (excitonic) transfer integrals in the hamiltonian -------------- 
+                    !---------- set (excitonic) transfer integrals in the hamiltonian --------------
                     if (useTIexciton) then
                         ! check if also excitonic TI for the very same connection exists
                         call getExcitonIndex_shifted(globId1, Sx_shifted1, Sy_shifted1, Sz_shifted1, v1, c1)  ! it is very important that we use the shifted indexes here!!
@@ -472,7 +472,7 @@ module Hamiltonian
                 endif  !match c1,v1 index
             enddo !closes loop over neighbors
             endif
-            
+
             if (nbar.gt.nbar_max) then  ! monitor how many neighbors are actually used
             nbar_max = nbar
             ! if (p_id.eq.0) write(*,*) "new nbar_max = ", nbar_max, nneigh
@@ -490,7 +490,7 @@ module Hamiltonian
 
             call MPI_Reduce(isUsedTIexciton, isUsedTIexciton_global, NumExcitTIused, &
                 &MPI_LOGICAL, MPI_LXOR, 0, MPI_COMM_WORLD, ierr)
-                
+
 
             if (p_id.eq.0) then
             jj = 0
@@ -602,7 +602,7 @@ module Hamiltonian
         !    enddo
         ! endif
 
-        
+
         if(p_id.eq.0) then
             write(*,*) ""
             write(*,*) 'Hamiltonian finished.'
@@ -792,6 +792,7 @@ module Hamiltonian
         numTI = NAT1inner*NBATouter + NAT1outer*NBATinner
         if(p_id.eq.0) write(*,*) '--> Estimated number of single-particle TI = ', numTI
         allocate(NNMAP(numTI, 7))
+        NNMAP = 0
 
         ! inner (conduction) TI
         j=1
@@ -834,11 +835,11 @@ module Hamiltonian
             Sz = NNMAPouter(i,5)
 
             TIsingle(c1,v1,c2,v2,Sx,Sy,Sz) = TIsingle(c1,v1,c2,v2,Sx,Sy,Sz) - TIouter(i) / gamma
-            
+
 
             ! set NNMAP if not already contained
             isContained = .false.
-            do k=1,j
+            do k=1,j-1
                 if ((NNMAP(k,1).eq.c1).and.(NNMAP(k,2).eq.v1).and.(NNMAP(k,3).eq.c2).and.(NNMAP(k,4).eq.v2).and.&
                     &(NNMAP(k,5).eq.Sx).and.(NNMAP(k,6).eq.Sy).and.(NNMAP(k,7).eq.Sz)) THEN
                         isContained = .true.
@@ -847,6 +848,7 @@ module Hamiltonian
             enddo
 
             if (.not.isContained) then
+                ! if (p_id .eq. 0) write(*,*) "j = ", j
                 NNMAP(j,1) = c1
                 NNMAP(j,2) = v1
                 NNMAP(j,3) = c2
@@ -910,9 +912,6 @@ module Hamiltonian
         STOP
 149   CONTINUE
 
-
-        ! TODO check if complex conjugate is present!!! --> Hermiticity
-
         return
 
     END SUBROUTINE read_tinfile
@@ -922,7 +921,7 @@ module Hamiltonian
         ! a hermitian Hamiltonian.
         ! It does not check the actual Hamiltonian !!!
         USE Geometry
-        
+
         DOUBLE COMPLEX, intent(in), allocatable :: TIsingle(:, :, :, :, :, :, :)
         integer max_shift(3), NBATinner, NBATouter
         double complex val1, val2
@@ -946,7 +945,7 @@ module Hamiltonian
                     do ii=0,max_shift(1)
                         do jj=0,max_shift(2)
                         do kk=0,max_shift(3)
-                        
+
                             val1 = TIsingle(c1,v1,c2,v2,ii,jj,kk)
                             val2 = CONJG(TIsingle(c2,v2,c1,v1,-ii,-jj,-kk))
 
@@ -957,7 +956,7 @@ module Hamiltonian
                                 write(*,*) c2,v2,c1,v1,-ii,-jj,-kk, val2
 
                                 stop
-                                
+
                             endif
 
                         enddo
@@ -967,7 +966,7 @@ module Hamiltonian
             enddo
             enddo
         enddo
-    
+
 
         write(*,*) "--> single particle TIs are hermitian :D"
 
@@ -981,7 +980,7 @@ module Hamiltonian
         ! This is necessary to allocate large enough TIinner/ TIouter arrays.
         ! Input :   p_id   = id of process
         !           filename  = path to the TINFILE
-        ! Ouput :   max_shift = 3-dim array of maximum shifts 
+        ! Ouput :   max_shift = 3-dim array of maximum shifts
         implicit none
         integer max_shift(3)
         integer p_id, NAT1, i, l,ll,ii,jj,kk
@@ -1000,10 +999,10 @@ module Hamiltonian
         read(13,*,ERR=342) dummy
         ! if(p_id.eq.0) write(*,*) 'Number of TI = ', NAT1
 
-        ! 
+        !
         do i=1,NAT1
             read(13,*,ERR=344) l,ll,ii,jj,kk,val1, val2
-            
+
             max_shift(1) = max(max_shift(1), abs(ii))
             max_shift(2) = max(max_shift(2), abs(jj))
             max_shift(3) = max(max_shift(3), abs(kk))
@@ -1058,7 +1057,7 @@ module Hamiltonian
 
         open(123,FILE='./ONSITE_ENERGY_c',ACTION='READ')
         open(124,FILE='./ONSITE_ENERGY_v',ACTION='READ')
-        
+
         read(123,*) NprimSites_i
         read(124,*) NprimSites_o
 
@@ -1100,7 +1099,7 @@ module Hamiltonian
         endif
 
         return
-    
+
     END SUBROUTINE read_onsite_energies
 
 ! #ifdef DEBUG
@@ -1113,15 +1112,15 @@ module Hamiltonian
 !          LOGICAL HERMQ
 
 !          HERMQ=.TRUE.
-    
+
 !          do i=1,nneigh
 !             do m=1,sites_p_len
 
 !                if(neiList(m,i).ne.0) then
 !                   !if(neiList(m,nneigh).ne.neiList(m,2*nneigh/3))then
-!                   if(neiList(m,i+nneigh)-1.eq.p_id) then 
+!                   if(neiList(m,i+nneigh)-1.eq.p_id) then
 !                      n=neiList(m,i)
-            
+
 !                      do j=1,nneigh
 !                         if(neiList(n,j).eq.m) jj=j
 !                      enddo
@@ -1135,9 +1134,9 @@ module Hamiltonian
 
 !             enddo
 !          enddo
-        
+
 !          write(*,*) 'Hamiltonian HermitianQ=',HERMQ
-        
+
 !       END SUBROUTINE hamilt_hermitianq
 ! #endif
 
@@ -1164,8 +1163,8 @@ module Hamiltonian
             globId = sites_p(i)
             call getExcitonIndex_shifted(globId, Sx, Sy, Sz, lo, li)
             write(1,*) lo, li, Sx, Sy, Sz, REAL(enList(i)), IMAG(enList(i))
-        end do  
-        
+        end do
+
         close(1)
 
 
@@ -1207,11 +1206,11 @@ module Hamiltonian
 
             read_loop: do
             read (114, '(A)', iostat=stat)  line
-    
+
             if ( stat /= 0 )  exit read_loop             ! check end of file or other errors
             if ( line .eq. ' ') cycle read_loop          ! skip empty lines
             if (index (line, "#")/= 0)  cycle read_loop  ! skip comment lines
-    
+
             ! store data in arrays
             read (line, *, iostat=stat) c1, c2, v1, v2, (RD(ii), ii=1,3), (S1(jj), jj=1,3), (S2(kk), kk=1,3), val1,val2
 
@@ -1223,7 +1222,7 @@ module Hamiltonian
                 minS(ii) = min(minS(ii), S1(ii), S2(ii))
                 maxS(ii) = max(maxS(ii), S1(ii), S2(ii))
             enddo
-    
+
             end do read_loop
         else
             if (p_id.eq.0) write(*,*) "skip local field effects in get_max_shift_interaction_elements"
@@ -1308,7 +1307,7 @@ module Hamiltonian
         character (len=500) :: line
         DOUBLE PRECISION WW
         DOUBLE PRECISION max_dist_coulomb, val1, val2, gamma
-        
+
         LOGICAL LFI_ONS
 
         intent(in) p_id, gamma, NumMatEl
@@ -1334,7 +1333,7 @@ module Hamiltonian
 
         if(p_id.eq.0) then
             write(*,*) 'Generate local field effects: WW_FE = ', WW
-            if (abs(WW-1.0).gt.1e-8) then 
+            if (abs(WW-1.0).gt.1e-8) then
                 write(*,*) '[WARNING] Local field effects should us the bare interaction WW_FE==1 without any screening!!!'
             endif
         endif
@@ -1581,7 +1580,7 @@ module Hamiltonian
             TIexciton(ii) = sym_val
             TIexciton(elementId) = conjg(sym_val)
             endif
-            
+
         enddo
     end subroutine symmetrize_TIexciton
 
@@ -1649,21 +1648,21 @@ module Hamiltonian
         ! internal variables
         INTEGER :: cadd
         character(len=1024) :: filename
-    
+
         write (filename, "(A7,I2,A9,I2,A4)") "test/enList",p_id,".dat"
         open(42, file=filename)
-        
+
         ! save onsite energies
         write(*,*) "Save on-site energies at ", filename
         do cadd=1,sites_p_len
             write(42,*) sites_p(cadd), DREAL(enList(cadd)*gamma), DIMAG(enList(cadd)*gamma)
         enddo
-        
+
         close(42)
-        
+
     end subroutine save_onsiteEnergies
 #endif
-        
+
 ! #ifdef DEBUG
 !       subroutine save_alltransferintegrals(sites_p_len,sites_p,neiList, p_id, traList, gamma)
 !          ! writes the transfer integrals in a output file (mainly for testing purposes)
@@ -1677,7 +1676,7 @@ module Hamiltonian
 !          ! internal variables
 !          INTEGER :: cadd, neigh
 !          character(len=1024) :: filename
-        
+
 !          write (filename, "(A7,I2,A9,I2,A4)") "test/traList",p_id,".dat"
 !          open(43, file=filename)
 !          ! save transfer integrals energies
@@ -1688,7 +1687,7 @@ module Hamiltonian
 !                enddo
 !          enddo
 !          close(43)
-        
+
 !       end subroutine save_alltransferintegrals
 ! #endif
 
