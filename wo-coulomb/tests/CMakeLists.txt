@@ -10,7 +10,10 @@ include_directories(${GTEST_INCLUDE_DIRS})
 
 # Link runTests with what we want to test and the GTest and pthread library
 add_executable(runTests.x tests.cpp)
-target_include_directories(runTests.x PUBLIC ..)
+target_include_directories(runTests.x PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../external
+)
 target_link_libraries(runTests.x PUBLIC ${GTEST_LIBRARIES} MPI::MPI_CXX OpenMP::OpenMP_CXX ${FFTW_THREADS_LIB} ${FFTW_LIB})
 target_link_libraries(runTests.x )
 

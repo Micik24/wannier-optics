@@ -1,6 +1,6 @@
 // tests.cpp
 #include <wannierfunction.h>
-#include <generator.cpp>
+#include "testsupport/generator.h"
 #include <vector>
 #include <gtest/gtest.h>
 

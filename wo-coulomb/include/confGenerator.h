@@ -18,7 +18,7 @@
 #include <filesystem>
 #include <regex>
 
-#include "external/simpleini/SimpleIni.h"
+#include "simpleini/SimpleIni.h"
 
 
 using namespace std;

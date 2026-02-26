@@ -23,7 +23,6 @@
 #include "CHGCAR.h"
 #include "density.h"
 #include "opticalDipole.h"
-#include "solver.h"
 
 using namespace std;
 

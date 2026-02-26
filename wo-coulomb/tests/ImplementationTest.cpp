@@ -3,8 +3,8 @@
 #include <coulombIntegral.h>
 #include <wannierfunction.h>
 #include <potential.h>
-#include <solver.h>
-#include <generator.cpp>
+#include <backend/cpu/solver_cpu.h>
+#include "testsupport/generator.h"
 #include <gtest/gtest.h>
 #include <iostream>
 using namespace std;

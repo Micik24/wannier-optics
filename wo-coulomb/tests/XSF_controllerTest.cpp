@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <exception>
 #include "filehandler.h"
-#include <generator.cpp>
+#include "testsupport/generator.h"
 
 
 TEST(XSF_controllerTest, FileNotFound) {

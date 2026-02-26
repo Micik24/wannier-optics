@@ -1,8 +1,8 @@
-#ifndef GENERATOR_CPP
-#define GENERATOR_CPP
+#ifndef GENERATOR_H
+#define GENERATOR_H
 
 /**
- * @file generator.cpp
+ * @file generator.h
  * @author Konrad Merkel
  * @brief Generate test (Wannier) function.
  *
@@ -92,4 +92,4 @@ WannierFunction generateCube(int id, shared_ptr<RealMeshgrid> meshgrid, vector< 
 }
 
 
-#endif  // GENERATOR_CPP
+#endif  // GENERATOR_H

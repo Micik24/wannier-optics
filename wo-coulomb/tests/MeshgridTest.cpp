@@ -1,6 +1,6 @@
 // tests.cpp
 #include <meshgrid.h>
-#include <solver.h>
+#include <backend/cpu/solver_cpu.h>
 #include <vector>
 #include <fftw3.h>
 #include <gtest/gtest.h>

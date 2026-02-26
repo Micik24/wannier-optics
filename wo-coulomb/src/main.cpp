@@ -5,7 +5,7 @@
 #include "wannierfunction.h"
 #include "density.h"
 #include "potential.h"
-#include "solver.h"
+#include "backend/backend.h"
 #include "filehandler.h"
 #include "scheduler.h"
 #include "parallel_computation.h"
@@ -22,7 +22,7 @@
 #include <mpi.h>
 #include <cmath>
 
-#include "external/simpleini/SimpleIni.h"
+#include "simpleini/SimpleIni.h"
 
 using namespace std;
 
@@ -43,7 +43,7 @@ void printHelp(string name = "wo-coulomb.x", int rank=0) {
 }
 
 
-void calcScreening(Scheduler const* myScheduler, map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap,
+void calcScreening(Backend& backend, Scheduler const* myScheduler, map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap,
                 map<int,double> const& vMeanDensity, map<int,double> const& cMeanDensity,
                 const double SCREENING_RELATIVE_PERMITTIVITY, const double SCREENING_ALPHA,
                 string const& outfile, string const& restartfile, const int NUM_OMP_THREADS)
@@ -59,7 +59,7 @@ void calcScreening(Scheduler const* myScheduler, map< int,WannierFunction > cons
     string yukawa_restartfile = restartfile + string("_YUK_") + to_string(SCREENING_RELATIVE_PERMITTIVITY) + string("_") + to_string(SCREENING_ALPHA);
 
     // setup solver
-    YukawaSolver impl(vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA);
+    auto impl = backend.createYukawaSolver(vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA);
 
     // setup scheduler
     unique_ptr<FixedListScheduler> yukawa_scheduler{};
@@ -78,7 +78,7 @@ void calcScreening(Scheduler const* myScheduler, map< int,WannierFunction > cons
         }
     }
 
-    run_parallel_calculations(impl, yukawa_scheduler.get(), NUM_OMP_THREADS, yukawa_outfile, yukawa_restartfile);
+    run_parallel_calculations(*impl, yukawa_scheduler.get(), NUM_OMP_THREADS, yukawa_outfile, yukawa_restartfile);
 
     if (rank==0) {
         cout << "Create superposition of Coulomb and Yukawa integrals...\n";
@@ -305,7 +305,7 @@ void calc_transition(shared_ptr<RealMeshgrid> const& mesh, map< int,WannierFunct
 }
 
 
-void calc_custom_file(int BATCH_SIZE, map< int,string > const& vMapping, map< int,string > const& cMapping,
+void calc_custom_file(Backend& backend, int BATCH_SIZE, map< int,string > const& vMapping, map< int,string > const& cMapping,
                         map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap,
                         map<int,double> const& vMeanDensity, map<int,double> const& cMeanDensity,
                         const int NUM_OMP_THREADS, const bool ENABLE_SCREENING_MODEL, const double SCREENING_RELATIVE_PERMITTIVITY, const double SCREENING_ALPHA)
@@ -324,7 +324,7 @@ void calc_custom_file(int BATCH_SIZE, map< int,string > const& vMapping, map< in
     }
 
     // setup solver
-    CoulombSolver impl(vWannMap, cWannMap);
+    auto impl = backend.createCoulombSolver(vWannMap, cWannMap);
 
     // setup scheduler
     unique_ptr<FixedListScheduler> file_scheduler{};
@@ -354,13 +354,13 @@ void calc_custom_file(int BATCH_SIZE, map< int,string > const& vMapping, map< in
         cout << "\n---------------------------------------\n\n";
     }
 
-    run_parallel_calculations(impl, file_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+    run_parallel_calculations(*impl, file_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
     if (ENABLE_SCREENING_MODEL)
-        calcScreening(file_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
+        calcScreening(backend, file_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 }
 
 
-void calc_local_field_effects(int BATCH_SIZE, map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap, vector<vector<vector<int>>> const& shells, const int NUM_OMP_THREADS, const double ABSOLUTE_CHARGE_THRESHOLD, filesystem::path const& DATA_DIR)
+void calc_local_field_effects(Backend& backend, int BATCH_SIZE, map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap, vector<vector<vector<int>>> const& shells, const int NUM_OMP_THREADS, const double ABSOLUTE_CHARGE_THRESHOLD, filesystem::path const& DATA_DIR)
 {
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -371,7 +371,7 @@ void calc_local_field_effects(int BATCH_SIZE, map< int,WannierFunction > const& 
     const string restartfile = DATA_DIR / "RESTART_LFE";
 
     // setup solver
-    LocalFieldEffectsSolver impl(vWannMap, cWannMap);
+    auto impl = backend.createLocalFieldEffectsSolver(vWannMap, cWannMap);
 
 
     // get Indicator parameters for valence WF
@@ -402,7 +402,7 @@ void calc_local_field_effects(int BATCH_SIZE, map< int,WannierFunction > const& 
             BATCH_SIZE, num_worker, lfe_indicators, ABSOLUTE_CHARGE_THRESHOLD, restartfile, outfile);
     }
 
-    run_parallel_calculations(impl, lfe_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+    run_parallel_calculations(*impl, lfe_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
 }
 
 
@@ -411,6 +411,9 @@ int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_worker);
+
+    auto backend = makeBackend();
+    Backend& backend_ref = *backend;
 
     printWelcomeCoulombIntegral(rank);
     cout << fixed;
@@ -845,7 +848,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate individual Coulomb integrals from file:\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
-        calc_custom_file(BATCH_SIZE, vMapping, cMapping, vWannMap, cWannMap, vMeanDensity, cMeanDensity, NUM_OMP_THREADS, ENABLE_SCREENING_MODEL, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA);
+        calc_custom_file(backend_ref, BATCH_SIZE, vMapping, cMapping, vWannMap, cWannMap, vMeanDensity, cMeanDensity, NUM_OMP_THREADS, ENABLE_SCREENING_MODEL, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA);
     }
 
 
@@ -862,7 +865,7 @@ int main(int argc, char *argv[]) {
         const string restartfile = DATA_DIR / "RESTART_2";
 
         // setup solver
-        CoulombSolver impl(vWannMap, cWannMap);
+        auto impl = backend_ref.createCoulombSolver(vWannMap, cWannMap);
 
         // setup scheduler
         unique_ptr<CombinedDensityDensityFixedRScheduler> density_scheduler{};
@@ -873,9 +876,9 @@ int main(int argc, char *argv[]) {
         }
 
         // run all calculations
-        run_parallel_calculations(impl, density_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+        run_parallel_calculations(*impl, density_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
         if (ENABLE_SCREENING_MODEL)
-            calcScreening(density_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
+            calcScreening(backend_ref, density_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 
     }
 
@@ -940,7 +943,7 @@ int main(int argc, char *argv[]) {
         const string restartfile = DATA_DIR / "RESTART_3";
 
         // setup solver
-        CoulombSolver impl(vWannMap, cWannMap);
+        auto impl = backend_ref.createCoulombSolver(vWannMap, cWannMap);
 
         // create scheduler
         unique_ptr<OverlapDensityScheduler> overlap_scheduler{};
@@ -952,9 +955,9 @@ int main(int argc, char *argv[]) {
         }
 
         // run all calculations
-        run_parallel_calculations(impl, overlap_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+        run_parallel_calculations(*impl, overlap_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
         if (ENABLE_SCREENING_MODEL)
-            calcScreening(overlap_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
+            calcScreening(backend_ref, overlap_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 
     }
 
@@ -971,7 +974,7 @@ int main(int argc, char *argv[]) {
         const string restartfile = DATA_DIR / "RESTART_4";
 
         // setup solver
-        CoulombSolver impl(vWannMap, cWannMap);
+        auto impl = backend_ref.createCoulombSolver(vWannMap, cWannMap);
 
         // setup scheduler
         unique_ptr<OverlapDensityScheduler> overlap_overlap_scheduler{};
@@ -983,9 +986,9 @@ int main(int argc, char *argv[]) {
         }
 
         // run all calculations
-        run_parallel_calculations(impl, overlap_overlap_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+        run_parallel_calculations(*impl, overlap_overlap_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
         if (ENABLE_SCREENING_MODEL)
-            calcScreening(overlap_overlap_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
+            calcScreening(backend_ref, overlap_overlap_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 
     }
 
@@ -1118,7 +1121,7 @@ int main(int argc, char *argv[]) {
             cout << "\n----------------------------------------------------------------------\n";
         }
 
-        calc_local_field_effects(BATCH_SIZE, vWannMap, cWannMap, shells, NUM_OMP_THREADS, ABSOLUTE_CHARGE_THRESHOLD, DATA_DIR);
+        calc_local_field_effects(backend_ref, BATCH_SIZE, vWannMap, cWannMap, shells, NUM_OMP_THREADS, ABSOLUTE_CHARGE_THRESHOLD, DATA_DIR);
 
         if (rank==0) {
             cout << "\n----------------------------------------------------------------------\n";

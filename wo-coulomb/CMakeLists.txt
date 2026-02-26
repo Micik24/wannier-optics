@@ -7,8 +7,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_CXX_EXTENSIONS False)
 
-#project(CoulombIntegral)
-add_executable(${PROJECT_NAME}.x main.cpp)
+option(WO_COULOMB_BUILD_GPU "Build GPU backend binary" OFF)
+
+set(WO_COULOMB_CPU_TARGET ${PROJECT_NAME}.x)
+set(WO_COULOMB_GPU_TARGET ${PROJECT_NAME}-gpu.x)
+
+set(WO_COULOMB_COMMON_SOURCES
+    src/main.cpp
+    src/backend/backend_factory.cpp
+)
+
+add_executable(${WO_COULOMB_CPU_TARGET}
+    ${WO_COULOMB_COMMON_SOURCES}
+    src/backend/cpu/backend_cpu.cpp
+)
+target_compile_definitions(${WO_COULOMB_CPU_TARGET} PRIVATE WO_BACKEND_CPU=1)
 
 # parallelization
 find_package(OpenMP 4.0 REQUIRED)
@@ -20,8 +33,26 @@ pkg_check_modules(FFTW IMPORTED_TARGET REQUIRED fftw3)
 include_directories(PkgConfig::FFTW)
 link_libraries(PkgConfig::FFTW)
 
-target_include_directories(${PROJECT_NAME}.x PUBLIC PkgConfig::FFTW)
-target_link_libraries(${PROJECT_NAME}.x PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+target_include_directories(${WO_COULOMB_CPU_TARGET} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/external
+    PkgConfig::FFTW
+)
+target_link_libraries(${WO_COULOMB_CPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+
+if (WO_COULOMB_BUILD_GPU)
+    add_executable(${WO_COULOMB_GPU_TARGET}
+        ${WO_COULOMB_COMMON_SOURCES}
+        src/backend/gpu/backend_gpu.cpp
+    )
+    target_compile_definitions(${WO_COULOMB_GPU_TARGET} PRIVATE WO_BACKEND_GPU=1)
+    target_include_directories(${WO_COULOMB_GPU_TARGET} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external
+        PkgConfig::FFTW
+    )
+    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+endif()
 
 # tell the program its git commit id
 execute_process(
@@ -46,4 +77,7 @@ else()
 endif()
 
 
-install(TARGETS ${PROJECT_NAME}.x RUNTIME DESTINATION bin)
+install(TARGETS ${WO_COULOMB_CPU_TARGET} RUNTIME DESTINATION bin)
+if (WO_COULOMB_BUILD_GPU)
+    install(TARGETS ${WO_COULOMB_GPU_TARGET} RUNTIME DESTINATION bin)
+endif()

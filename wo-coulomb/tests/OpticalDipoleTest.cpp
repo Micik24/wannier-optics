@@ -2,7 +2,7 @@
 
 #include <wannierfunction.h>
 #include <opticalDipole.h>
-#include <generator.cpp>
+#include "testsupport/generator.h"
 #include <gtest/gtest.h>
 #include <iostream>
 using namespace std;
