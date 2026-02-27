@@ -132,7 +132,7 @@ struct Density_indicator
  * @param R
  * @param density  output density (already allocated array)
  */
-void joinedDensity(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R, fftw_complex* density)
+inline void joinedDensity(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R, fftw_complex* density)
 {
     if (density == nullptr)
         throw runtime_error("fftw_complex array for density has to be allocated!");
@@ -228,7 +228,7 @@ void joinedDensity(WannierFunction const& wann1, WannierFunction const& wann2, v
  * @param R
  * @return double*
  */
-unique_ptr<double[], free_deleter> joinedDensity(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R)
+inline unique_ptr<double[], free_deleter> joinedDensity(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R)
 {
 
     if (!wann1.isCompatible(wann2)) {
@@ -309,7 +309,7 @@ unique_ptr<double[], free_deleter> joinedDensity(WannierFunction const& wann1, W
  * @brief Checks if an array only contains zeros.
  *
  */
-bool isZero(const double* density, int N) {
+inline bool isZero(const double* density, int N) {
     bool isZero = true;
     for (int j=0; j<N; j++) {
         if (abs(density[j]) > 1e-10) {
@@ -325,7 +325,7 @@ bool isZero(const double* density, int N) {
  * @brief Checks if an array only contains zeros.
  *
  */
-bool isZero(const fftw_complex* density, int N) {
+inline bool isZero(const fftw_complex* density, int N) {
     bool isZero = true;
     for (int j=0; j<N; j++) {
         if ((abs(density[j][0]) > 1e-10) || (abs(density[j][1]) > 1e-10)) {
@@ -344,7 +344,7 @@ bool isZero(const fftw_complex* density, int N) {
  * @param mesh real space grid, where the density is defined
  * @return Monopole
  */
-Monopole getMonopole(const double* density, const RealMeshgrid* mesh)
+inline Monopole getMonopole(const double* density, const RealMeshgrid* mesh)
 {
     // shared variables
     const int Npoints = mesh->getNumDataPoints();
@@ -407,7 +407,7 @@ Monopole getMonopole(const double* density, const RealMeshgrid* mesh)
  * @param mesh real space grid, where the density is defined
  * @return Monopole
  */
-Monopole getMonopole(const fftw_complex* density, const RealMeshgrid* mesh)
+inline Monopole getMonopole(const fftw_complex* density, const RealMeshgrid* mesh)
 {
     // shared variables
     const int Npoints = mesh->getNumDataPoints();
@@ -465,7 +465,7 @@ Monopole getMonopole(const fftw_complex* density, const RealMeshgrid* mesh)
  * @brief Calculates covariance matrix for a given charge density
  *
  */
-vector< vector<double>> getCovariance(const double* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
+inline vector< vector<double>> getCovariance(const double* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
 {
     vector< vector<double>> var(3);
     for (int i=0;i<3;i++) {
@@ -493,7 +493,7 @@ vector< vector<double>> getCovariance(const double* density, const RealMeshgrid*
  * @brief Calculates mean of the eigen-values of the covariance matrix from the trace of the matrix.
  *
  */
-double getMeanVariance(const fftw_complex* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
+inline double getMeanVariance(const fftw_complex* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
 {
     double var=0.0;
     vector<double> xyz{0,0,0};
@@ -518,7 +518,7 @@ double getMeanVariance(const fftw_complex* density, const RealMeshgrid* mesh, ve
  * @param wann1,wann2 Wannier functions
  * @param R  relative shift in units of primitive lattice vectors
  */
-double scalarProduct(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R = vector<int>{0,0,0}) {
+inline double scalarProduct(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R = vector<int>{0,0,0}) {
 
   if (! wann1.isCompatible(wann2)) {
     throw runtime_error("Cannot calcualte scalar product between two WF that are not compatible.");
@@ -553,7 +553,7 @@ double scalarProduct(WannierFunction const& wann1, WannierFunction const& wann2,
  * @param mono centre of the Wannier function
  * @return double
  */
-double getSupportRadius(WannierFunction const& wann, double threshold, Monopole* mono=0)
+inline double getSupportRadius(WannierFunction const& wann, double threshold, Monopole* mono=0)
 {
     const RealMeshgrid* meshgrid = wann.getMeshgrid();
     if (mono==0) {
@@ -589,7 +589,7 @@ double getSupportRadius(WannierFunction const& wann, double threshold, Monopole*
  * @param mesh
  * @return Monopole
  */
-Monopole getAbsMonopole(const double* density, const RealMeshgrid* mesh)
+inline Monopole getAbsMonopole(const double* density, const RealMeshgrid* mesh)
 {
 
     if (! mesh->hasMeshgridArrays()) {
@@ -660,7 +660,7 @@ Monopole getAbsMonopole(const double* density, const RealMeshgrid* mesh)
  * @param mesh
  * @return Monopole
  */
-Monopole getAbsMonopole(const fftw_complex* density, RealMeshgrid* mesh)
+inline Monopole getAbsMonopole(const fftw_complex* density, RealMeshgrid* mesh)
 {
 
     if (! mesh->hasMeshgridArrays()) {
@@ -718,7 +718,7 @@ Monopole getAbsMonopole(const fftw_complex* density, RealMeshgrid* mesh)
 }
 
 
-vector<double> getAbsVariance(const double* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
+inline vector<double> getAbsVariance(const double* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
 {
 
     if (! mesh->hasMeshgridArrays()) {
@@ -747,7 +747,7 @@ vector<double> getAbsVariance(const double* density, const RealMeshgrid* mesh, v
 }
 
 
-vector<double> getAbsVariance(const fftw_complex* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
+inline vector<double> getAbsVariance(const fftw_complex* density, const RealMeshgrid* mesh, vector<double> chargeCenter)
 {
 
     if (! mesh->hasMeshgridArrays()) {
@@ -776,7 +776,7 @@ vector<double> getAbsVariance(const fftw_complex* density, const RealMeshgrid* m
 }
 
 
-double getExtend(const double* density, const RealMeshgrid* mesh, Monopole const& mono, double criterion=1e-4)
+inline double getExtend(const double* density, const RealMeshgrid* mesh, Monopole const& mono, double criterion=1e-4)
 {
     vector<double> variance = getAbsVariance(density, mesh, vector<double>{mono.x,mono.y,mono.z});
 
@@ -885,7 +885,7 @@ double getExtend(const double* density, const RealMeshgrid* mesh, Monopole const
 }
 
 
-double getExtend(fftw_complex* density, const RealMeshgrid* mesh, Monopole mono, double criterion=1e-4)
+inline double getExtend(fftw_complex* density, const RealMeshgrid* mesh, Monopole mono, double criterion=1e-4)
 {
     vector<double> variance = getAbsVariance(density, mesh, vector<double>{mono.x,mono.y,mono.z});
 
@@ -996,7 +996,7 @@ double getExtend(fftw_complex* density, const RealMeshgrid* mesh, Monopole mono,
  * @param criterion_extend
  * @return Density_indicator
  */
-Density_indicator calc_indicator(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R, const double criterion_extend) {
+inline Density_indicator calc_indicator(WannierFunction const& wann1, WannierFunction const& wann2, vector<int> const& R, const double criterion_extend) {
 
     Density_indicator data;
 
@@ -1015,7 +1015,7 @@ Density_indicator calc_indicator(WannierFunction const& wann1, WannierFunction c
 }
 
 
-map<Density_descr,Density_indicator> calcIndicator_estimates(const map< int,WannierFunction >& wannMap, const vector<vector<vector<int>>>& shells, double criterion_extend)
+inline map<Density_descr,Density_indicator> calcIndicator_estimates(const map< int,WannierFunction >& wannMap, const vector<vector<vector<int>>>& shells, double criterion_extend)
 {
     map<Density_descr, Density_indicator> indicators{};
 
@@ -1072,7 +1072,7 @@ map<Density_descr,Density_indicator> calcIndicator_estimates(const map< int,Wann
  * @param ABSCHARGE_THRESHOLD   threshold for absolute charge
  * @return map<Density_descr,Density_indicator>*
  */
-map<Density_descr,Density_indicator> calcIndicator_estimates_parallel(map< int,WannierFunction > const& wannMap, vector<vector<vector<int>>> const& shells, const double criterion_extend, const double ABSCHARGE_THRESHOLD){
+inline map<Density_descr,Density_indicator> calcIndicator_estimates_parallel(map< int,WannierFunction > const& wannMap, vector<vector<vector<int>>> const& shells, const double criterion_extend, const double ABSCHARGE_THRESHOLD){
 
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1211,7 +1211,7 @@ map<Density_descr,Density_indicator> calcIndicator_estimates_parallel(map< int,W
 }
 
 
-map<Density_descr,Density_indicator> calcLFE_estimates(const map< int,WannierFunction >& cWannMap, const map< int,WannierFunction >& vWannMap, vector<vector<vector<int>>> const& shells, const double absCharge_threshold)
+inline map<Density_descr,Density_indicator> calcLFE_estimates(const map< int,WannierFunction >& cWannMap, const map< int,WannierFunction >& vWannMap, vector<vector<vector<int>>> const& shells, const double absCharge_threshold)
 {
     const RealMeshgrid* mesh = cWannMap.begin()->second.getMeshgrid();
     map<Density_descr, Density_indicator> indicators{};
@@ -1272,7 +1272,7 @@ map<Density_descr,Density_indicator> calcLFE_estimates(const map< int,WannierFun
  * @param ABSCHARGE_THRESHOLD
  * @return map<Density_descr,Density_indicator>*
  */
-map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,WannierFunction > const& cWannMap, map< int,WannierFunction > const& vWannMap, vector<vector<vector<int>>> const& shells, const double ABSCHARGE_THRESHOLD){
+inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,WannierFunction > const& cWannMap, map< int,WannierFunction > const& vWannMap, vector<vector<vector<int>>> const& shells, const double ABSCHARGE_THRESHOLD){
 
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1415,7 +1415,7 @@ map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,Wannier
  * @param indicators
  * @param wannMap
  */
-void checkCompatibilityIndicator(map<Density_descr,Density_indicator> const& indicators, map<int, WannierFunction> const& wannMap) {
+inline void checkCompatibilityIndicator(map<Density_descr,Density_indicator> const& indicators, map<int, WannierFunction> const& wannMap) {
 
     // check if all Wannier functions are contained in the indicator data
     for (auto itr = wannMap.begin(); itr != wannMap.end(); ++itr) {
@@ -1458,7 +1458,7 @@ void checkCompatibilityIndicator(map<Density_descr,Density_indicator> const& ind
  * @param vWannMap
  * @param cWannMap
  */
-void checkCompatibilityIndicator_lfe(map<Density_descr,Density_indicator> const& indicators, map<int, WannierFunction> const& vWannMap, map<int, WannierFunction> const& cWannMap) {
+inline void checkCompatibilityIndicator_lfe(map<Density_descr,Density_indicator> const& indicators, map<int, WannierFunction> const& vWannMap, map<int, WannierFunction> const& cWannMap) {
 
     // check if all valence Wannier functions are contained in the indicator data
     for (auto itr = vWannMap.begin(); itr != vWannMap.end(); ++itr) {
@@ -1520,7 +1520,7 @@ void checkCompatibilityIndicator_lfe(map<Density_descr,Density_indicator> const&
  * @param id            maps array-index to wannier-id
  * @return vector<vector<double>>  shape: [Number of WF, 3 (x,y,z)]
  */
-vector<vector<double>> calcWannierCenter(map< int,WannierFunction > const& WannMap, vector<int> const& id )
+inline vector<vector<double>> calcWannierCenter(map< int,WannierFunction > const& WannMap, vector<int> const& id )
 {
     const RealMeshgrid* mesh = WannMap.begin()->second.getMeshgrid();
 

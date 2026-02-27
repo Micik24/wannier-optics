@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_CXX_EXTENSIONS False)
 
 option(WO_COULOMB_BUILD_GPU "Build GPU backend binary" OFF)
+option(WO_COULOMB_BUILD_BENCH "Build wo-coulomb benchmark binary" ON)
 
 set(WO_COULOMB_CPU_TARGET ${PROJECT_NAME}.x)
 set(WO_COULOMB_GPU_TARGET ${PROJECT_NAME}-gpu.x)
@@ -52,6 +53,16 @@ if (WO_COULOMB_BUILD_GPU)
         PkgConfig::FFTW
     )
     target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+endif()
+
+if (WO_COULOMB_BUILD_BENCH)
+    add_executable(wo-coulomb-bench.x bench/bench_coulomb.cpp)
+    target_include_directories(wo-coulomb-bench.x PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external
+        PkgConfig::FFTW
+    )
+    target_link_libraries(wo-coulomb-bench.x PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
 endif()
 
 # tell the program its git commit id

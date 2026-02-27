@@ -14,6 +14,7 @@
 //#include <stdlib.h>
 #include <iomanip>
 #include <vector>
+#include <memory>
 #include <math.h>
 
 

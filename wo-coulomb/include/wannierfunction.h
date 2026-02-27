@@ -13,6 +13,10 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <utility>
 #include <math.h>
 #include <omp.h>
 
@@ -312,7 +316,7 @@ public:
  * @return true   WannierFunctions are compatible and share the same RealMeshgrid
  * @return false  WannierFuncitons are not compatible. Nothing has been changed.
  */
-bool tryToShareMeshgrid( map<int, WannierFunction>& vWannMap, map<int, WannierFunction>& cWannMap)
+inline bool tryToShareMeshgrid( map<int, WannierFunction>& vWannMap, map<int, WannierFunction>& cWannMap)
 {
     WannierFunction const& firstWann = vWannMap.begin()->second;
     shared_ptr<RealMeshgrid> mesh = firstWann.getSharedMeshgridPtr();
@@ -350,7 +354,7 @@ bool tryToShareMeshgrid( map<int, WannierFunction>& vWannMap, map<int, WannierFu
  * @param supercellDim  Dimensions of the new supercell
  * @return void
  */
-void createLargerSupercell(WannierFunction& wann, vector<int> supercellDim)
+inline void createLargerSupercell(WannierFunction& wann, vector<int> supercellDim)
 {
     assert(supercellDim.size() == 3);
     const vector<double> oldSupercell = wann.getLatticeInUnitcellBasis();
@@ -468,7 +472,7 @@ void createLargerSupercell(WannierFunction& wann, vector<int> supercellDim)
  * @param shift             Shift vector in terms of unit cells
  * @return WannierFunction New copy of Wannier function
  */
-void rotateWannierFunction(WannierFunction &wann, vector<int> shift)
+inline void rotateWannierFunction(WannierFunction &wann, vector<int> shift)
 {
     int N = wann.getMeshgrid()->getNumDataPoints();
     const RealMeshgrid* mesh = wann.getMeshgrid();

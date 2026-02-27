@@ -10,6 +10,8 @@
 #include "scheduler.h"
 #include "parallel_computation.h"
 #include "utils.h"
+#include "determinism.h"
+#include "timing.h"
 
 #include <iostream>
 #include <iomanip>
@@ -17,6 +19,7 @@
 #include <vector>
 #include <list>
 #include <map>
+#include <memory>
 #include <chrono>
 #include <filesystem>
 #include <mpi.h>
@@ -412,6 +415,13 @@ int main(int argc, char *argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_worker);
 
+    const bool timing_enabled = (rank == 0) && wo_timing::timingEnabledFromEnv(false);
+    wo_timing::TimingRegistry timing;
+    std::unique_ptr<wo_timing::ScopedTimer> total_timer{};
+    if (timing_enabled) {
+        total_timer = std::make_unique<wo_timing::ScopedTimer>(timing, "total", true);
+    }
+
     auto backend = makeBackend();
     Backend& backend_ref = *backend;
 
@@ -490,6 +500,7 @@ int main(int argc, char *argv[]) {
 
     //const uint BATCH_SIZE = stoi(ini.GetValue("general", "BATCH_SIZE", "10"));
     const int NUM_OMP_THREADS = stoi(ini.GetValue("general", "NUM_OMP_THREADS", "1"));
+    const bool DETERMINISTIC_DEFAULT = bool(stoi(ini.GetValue("general", "DETERMINISTIC", "1")));
     const vector<int> Nsupercell = configureSupercell(ini);
 
     // hidden options:
@@ -497,6 +508,9 @@ int main(int argc, char *argv[]) {
     const double criterion_extend = stod(ini.GetValue("general", "criterion_extend", "1e-2"));  // TODO: better name and better documentation
 
 
+    const auto env_deterministic = wo_determinism::readEnvBool("WO_DETERMINISTIC");
+    const bool DETERMINISTIC = env_deterministic.value_or(DETERMINISTIC_DEFAULT);
+    wo_determinism::applyDeterministicOpenMP(DETERMINISTIC);
     omp_set_num_threads(NUM_OMP_THREADS);
 
     if (rank==0) {  // display settings
@@ -526,6 +540,9 @@ int main(int argc, char *argv[]) {
         cout << "Technical / advanced settings: " << endl;
         cout << "MPI-Processes \t\t\t : " << num_worker << endl;
         cout << "NUM_OMP_THREADS \t\t : " << NUM_OMP_THREADS << endl;
+        cout << "DETERMINISTIC \t\t\t : " << DETERMINISTIC;
+        if (env_deterministic.has_value()) cout << " (env override)";
+        cout << endl;
         //cout << "BATCH_SIZE \t\t\t : " << BATCH_SIZE << endl;
         cout << "MONOPOLE_RELATIVE_ERROR_THRESHOLD: " << MONOPOLE_RELATIVE_ERROR_THRESHOLD << endl;
         cout << "ABSOLUTE_CHARGE_THRESHOLD \t : " << ABSOLUTE_CHARGE_THRESHOLD << endl;
@@ -621,8 +638,11 @@ int main(int argc, char *argv[]) {
     // map from Wannier function id to path of xsf-file for valence WF
     map< int,string > vMapping;
     map< int,string > cMapping;
-    readMapping(vMapping, vMappingFile, "-->", rank);
-    readMapping(cMapping, cMappingFile, "-->", rank);
+    {
+        wo_timing::ScopedTimer timer(timing, "read_mappings", timing_enabled);
+        readMapping(vMapping, vMappingFile, "-->", rank);
+        readMapping(cMapping, cMappingFile, "-->", rank);
+    }
 
     // print mappings
     if (rank==0) {
@@ -641,8 +661,13 @@ int main(int argc, char *argv[]) {
     /**
      *  Read and check Wannier functions
      **/
-    map< int,WannierFunction > vWannMap{ openAllWannierFunctions(vMapping, Nsupercell, rank) };   // map from Wannier function id to WannierFunction object for valence WF
-    map< int,WannierFunction > cWannMap{ openAllWannierFunctions(cMapping, Nsupercell, rank) };
+    map< int,WannierFunction > vWannMap{};   // map from Wannier function id to WannierFunction object for valence WF
+    map< int,WannierFunction > cWannMap{};
+    {
+        wo_timing::ScopedTimer timer(timing, "read_wannier_functions", timing_enabled);
+        vWannMap = openAllWannierFunctions(vMapping, Nsupercell, rank);
+        cWannMap = openAllWannierFunctions(cMapping, Nsupercell, rank);
+    }
     if (rank==0) cout << "Done reading all files.\n\n";
 
     // check if WF are compatible and make them use the same meshgrid object to save memory
@@ -669,9 +694,13 @@ int main(int argc, char *argv[]) {
     /**
      *  Preparation steps for meshgrids, Wannier functions, centers and shells
      **/
-    mesh->createMeshgridArrays();
+    {
+        wo_timing::ScopedTimer timer(timing, "meshgrid_arrays", timing_enabled);
+        mesh->createMeshgridArrays();
+    }
 
     if (NORMALIZE) {
+        wo_timing::ScopedTimer timer(timing, "normalize_wannier", timing_enabled);
         if (rank==0) cout << "Normalize all Wannier functions ... ";
         for_each(vWannMap.begin(), vWannMap.end(), [](auto& p){ p.second.normalize();});
         for_each(cWannMap.begin(), cWannMap.end(), [](auto& p){ p.second.normalize();});
@@ -679,75 +708,87 @@ int main(int argc, char *argv[]) {
     }
 
     // prepare Wannier centers
-    if (rank == 0) cout << "Calculate Wannier centers ...";
     vector<int> id_v, id_c;                           // array position to wannierId
     map<int,int> wId_to_arrayId_v, wId_to_arrayId_c;  // wannierId to array position
     vector<vector<double>> pos_c, pos_v;
-    id_v = vector<int>(vWannMap.size());
-    int i=0;
-    for (auto const& itr : vWannMap) {
-        id_v[i] = itr.first;
-        wId_to_arrayId_v.insert({itr.first, i});
-        i++;
-    }
-
-    id_c = vector<int>(cWannMap.size());
-    i=0;
-    for (auto const& itr : cWannMap) {
-        id_c[i] = itr.first;
-        wId_to_arrayId_c.insert({itr.first, i});
-        i++;
-    }
-    pos_c = calcWannierCenter(cWannMap, id_c);
-    pos_v = calcWannierCenter(vWannMap, id_v);
-    if (rank == 0) cout << " done\n";
-
-    // prepare shells and cell information
-    vector<double> origin_wf = cWannMap.begin()->second.getOriginInUnitcellBasis();
-    vector<double> supercell = cWannMap.begin()->second.getLatticeInUnitcellBasis();
-    vector<vector<double>> unitcell = cWannMap.begin()->second.getUnitcell();
-    vector<vector<vector<int>>> shells{ createShells(origin_wf, supercell, unitcell, vector<double>{0,0,0}, vector<double>{0,0,0}, CRYSTAL_PERIODIC) };
-    double MAX_ALLOWED_DISTANCE = getMaxRadiusInsideCell(mesh->getLattice(), CRYSTAL_PERIODIC, pos_c, pos_v, supercell, origin_wf, unitcell);
-    int BATCH_SIZE = min(shells[0].size(), size_t(100));
-
-    if (rank==0) {
-        cout << "BATCH_SIZE           = " << BATCH_SIZE << endl;
-        cout << "MAX_ALLOWED_DISTANCE = " << MAX_ALLOWED_DISTANCE << " Angström\n\n";
-
-        cout << "Notice: MAX_ALLOWED_DISTANCE is determined by the supercell and Wannier centers.\n";
-        cout << "    Integrals beyond this limit are skipped to avoid aliasing errors.\n";
-        cout << "    To support larger distances, increase the supercell through wannier90\n";
-        cout << "    or using SUPERCELL_DIM_* in the config file.\n\n";
-
-        if (MAX_ALLOWED_DISTANCE < 6) {
-            string warning_msg = "MAX_ALLOWED_DISTANCE seems to be quite small.\n"\
-                "The maximally allowed distance of 2-center integrals in your supercell is very small.\n"\
-                "Please make sure that your supercell is large enough for converged calculations.\n"\
-                "The maximal allowed distance is (approx.) the maximal radius of a sphere that completely\n"\
-                "fits into the supercell.\n\n"\
-                "MAX_ALLOWED_DISTANCE             = " + to_string(MAX_ALLOWED_DISTANCE) + " Angström\n";
-            runtime_warning(warning_msg);
-        }
-
-        cout << "Write POSFILE.\n";
-        writePOSFILE("POSFILE", unitcell, pos_c, pos_v, CRYSTAL_PERIODIC);
-
-        // save shells for debugging
-        cout << "Write "<< DATA_DIR / "shells.txt" << " for debugging.\n";
-        ofstream file(DATA_DIR / "shells.txt");
-        if (!file.is_open()) {
-            cout << "Cannot save shells!" << endl;
-            return 1;
-        }
-
-        i=0;
-        for (const auto& shell: shells) {
-            for (const auto& R: shell) {
-                file << i << "\t" << R[0] << "  " << R[1] << "  " << R[2] << "\n";
-            }
+    {
+        wo_timing::ScopedTimer timer(timing, "wannier_centers", timing_enabled);
+        if (rank == 0) cout << "Calculate Wannier centers ...";
+        id_v = vector<int>(vWannMap.size());
+        int i=0;
+        for (auto const& itr : vWannMap) {
+            id_v[i] = itr.first;
+            wId_to_arrayId_v.insert({itr.first, i});
             i++;
         }
-        file.close();
+
+        id_c = vector<int>(cWannMap.size());
+        i=0;
+        for (auto const& itr : cWannMap) {
+            id_c[i] = itr.first;
+            wId_to_arrayId_c.insert({itr.first, i});
+            i++;
+        }
+        pos_c = calcWannierCenter(cWannMap, id_c);
+        pos_v = calcWannierCenter(vWannMap, id_v);
+        if (rank == 0) cout << " done\n";
+    }
+
+    // prepare shells and cell information
+    vector<double> origin_wf{};
+    vector<double> supercell{};
+    vector<vector<double>> unitcell{};
+    vector<vector<vector<int>>> shells{};
+    double MAX_ALLOWED_DISTANCE = 0.0;
+    int BATCH_SIZE = 0;
+    {
+        wo_timing::ScopedTimer timer(timing, "prepare_shells", timing_enabled);
+        origin_wf = cWannMap.begin()->second.getOriginInUnitcellBasis();
+        supercell = cWannMap.begin()->second.getLatticeInUnitcellBasis();
+        unitcell = cWannMap.begin()->second.getUnitcell();
+        shells = createShells(origin_wf, supercell, unitcell, vector<double>{0,0,0}, vector<double>{0,0,0}, CRYSTAL_PERIODIC);
+        MAX_ALLOWED_DISTANCE = getMaxRadiusInsideCell(mesh->getLattice(), CRYSTAL_PERIODIC, pos_c, pos_v, supercell, origin_wf, unitcell);
+        BATCH_SIZE = min(shells[0].size(), size_t(100));
+
+        if (rank==0) {
+            cout << "BATCH_SIZE           = " << BATCH_SIZE << endl;
+            cout << "MAX_ALLOWED_DISTANCE = " << MAX_ALLOWED_DISTANCE << " Angström\n\n";
+
+            cout << "Notice: MAX_ALLOWED_DISTANCE is determined by the supercell and Wannier centers.\n";
+            cout << "    Integrals beyond this limit are skipped to avoid aliasing errors.\n";
+            cout << "    To support larger distances, increase the supercell through wannier90\n";
+            cout << "    or using SUPERCELL_DIM_* in the config file.\n\n";
+
+            if (MAX_ALLOWED_DISTANCE < 6) {
+                string warning_msg = "MAX_ALLOWED_DISTANCE seems to be quite small.\n"\
+                    "The maximally allowed distance of 2-center integrals in your supercell is very small.\n"\
+                    "Please make sure that your supercell is large enough for converged calculations.\n"\
+                    "The maximal allowed distance is (approx.) the maximal radius of a sphere that completely\n"\
+                    "fits into the supercell.\n\n"\
+                    "MAX_ALLOWED_DISTANCE             = " + to_string(MAX_ALLOWED_DISTANCE) + " Angström\n";
+                runtime_warning(warning_msg);
+            }
+
+            cout << "Write POSFILE.\n";
+            writePOSFILE("POSFILE", unitcell, pos_c, pos_v, CRYSTAL_PERIODIC);
+
+            // save shells for debugging
+            cout << "Write "<< DATA_DIR / "shells.txt" << " for debugging.\n";
+            ofstream file(DATA_DIR / "shells.txt");
+            if (!file.is_open()) {
+                cout << "Cannot save shells!" << endl;
+                return 1;
+            }
+
+            int shell_index = 0;
+            for (const auto& shell: shells) {
+                for (const auto& R: shell) {
+                    file << shell_index << "\t" << R[0] << "  " << R[1] << "  " << R[2] << "\n";
+                }
+                shell_index++;
+            }
+            file.close();
+        }
     }
 
 
@@ -756,44 +797,46 @@ int main(int argc, char *argv[]) {
      **/
     map<int,double> vMeanDensity{};
     map<int,double> cMeanDensity{};
-    if (filesystem::exists("CHGCAR")) {
-        if (rank==0) cout << "\nFound CHGCAR. Calculate ground state expecation values for screening model (experimental!).\n";
-        CHGCAR chg{ read_CHGCAR("CHGCAR", rank) };
-        if (rank==0) cout << "Number of valence electrons in CHGCAR: " << chg.getNumElectrons() << endl;
+    {
+        wo_timing::ScopedTimer timer(timing, "screening_mean_density", timing_enabled);
+        if (filesystem::exists("CHGCAR")) {
+            if (rank==0) cout << "\nFound CHGCAR. Calculate ground state expecation values for screening model (experimental!).\n";
+            CHGCAR chg{ read_CHGCAR("CHGCAR", rank) };
+            if (rank==0) cout << "Number of valence electrons in CHGCAR: " << chg.getNumElectrons() << endl;
 
-        chg.makeCompatible(vWannMap.begin()->second);
+            chg.makeCompatible(vWannMap.begin()->second);
 
+            if (rank==0) cout << "\nMean densities for valence WF used for model screening:\n";
+            for (auto itr = vWannMap.begin(); itr != vWannMap.end(); ++itr) {
+                double value = calcExpectationDensity(chg, itr->second);
+                if (rank==0) cout << itr->first << " :\t" << value << endl;
+                vMeanDensity.insert({itr->first, value});
+            }
 
-        if (rank==0) cout << "\nMean densities for valence WF used for model screening:\n";
-        for (auto itr = vWannMap.begin(); itr != vWannMap.end(); ++itr) {
-            double value = calcExpectationDensity(chg, itr->second);
-            if (rank==0) cout << itr->first << " :\t" << value << endl;
-            vMeanDensity.insert({itr->first, value});
-        }
+            if (rank==0) cout << "Mean densities for conduction WF used for model screening:\n";
+            for (auto itr = cWannMap.begin(); itr != cWannMap.end(); ++itr) {
+                double value = calcExpectationDensity(chg, itr->second);
+                if (rank==0) cout << itr->first << " :\t" << value << endl;
+                cMeanDensity.insert({itr->first, value});
+            }
 
-        if (rank==0) cout << "Mean densities for conduction WF used for model screening:\n";
-        for (auto itr = cWannMap.begin(); itr != cWannMap.end(); ++itr) {
-            double value = calcExpectationDensity(chg, itr->second);
-            if (rank==0) cout << itr->first << " :\t" << value << endl;
-            cMeanDensity.insert({itr->first, value});
-        }
+            chg.reset();  // not needed anymore (free memory)
+            if (rank==0) cout << endl;
+        }else{
+            if (rank==0) cout << "\nNo CHGCAR was found. Use average electron density in screening model.\n";
+            double value = NUM_VALENCE_ELECTRONS / det3x3(unitcell);
 
-        chg.reset();  // not needed anymore (free memory)
-        if (rank==0) cout << endl;
-    }else{
-        if (rank==0) cout << "\nNo CHGCAR was found. Use average electron density in screening model.\n";
-        double value = NUM_VALENCE_ELECTRONS / det3x3(unitcell);
+            if (rank==0) cout << "Mean densities for valence WF used for model screening:\n";
+            for (auto itr = vWannMap.begin(); itr != vWannMap.end(); ++itr) {
+                if (rank==0) cout << itr->first << " :\t" << value << endl;
+                vMeanDensity.insert({itr->first, value});
+            }
 
-        if (rank==0) cout << "Mean densities for valence WF used for model screening:\n";
-        for (auto itr = vWannMap.begin(); itr != vWannMap.end(); ++itr) {
-            if (rank==0) cout << itr->first << " :\t" << value << endl;
-            vMeanDensity.insert({itr->first, value});
-        }
-
-        if (rank==0) cout << "Mean densities for conduction WF used for model screening:\n";
-        for (auto itr = cWannMap.begin(); itr != cWannMap.end(); ++itr) {
-            if (rank==0) cout << itr->first << " :\t" << value << endl;
-            cMeanDensity.insert({itr->first, value});
+            if (rank==0) cout << "Mean densities for conduction WF used for model screening:\n";
+            for (auto itr = cWannMap.begin(); itr != cWannMap.end(); ++itr) {
+                if (rank==0) cout << itr->first << " :\t" << value << endl;
+                cMeanDensity.insert({itr->first, value});
+            }
         }
     }
     // calculate yukawa parameter
@@ -836,6 +879,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate electron-hole transition elements (optical dipoles):\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "transition_matrix", timing_enabled);
         calc_transition(mesh, vWannMap, cWannMap, pos_c, pos_v, wId_to_arrayId_c, wId_to_arrayId_v, NUM_OMP_THREADS, ENABLE_TRANSITION_CORRECTIONS);
     }
 
@@ -848,6 +892,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate individual Coulomb integrals from file:\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "custom_integrals", timing_enabled);
         calc_custom_file(backend_ref, BATCH_SIZE, vMapping, cMapping, vWannMap, cWannMap, vMeanDensity, cMeanDensity, NUM_OMP_THREADS, ENABLE_SCREENING_MODEL, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA);
     }
 
@@ -860,6 +905,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate 2-center Coulomb integrals (density-density):\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "density_density", timing_enabled);
 
         const string outfile = DATA_DIR / "DENSITY_DENSITY";
         const string restartfile = DATA_DIR / "RESTART_2";
@@ -893,6 +939,7 @@ int main(int argc, char *argv[]) {
             cout << "\nPrepare indicators for valence and conduction densities:\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "prepare_indicators", timing_enabled);
 
         // get Indicator parameter for valence WF
         vIndicators = readIndicator_estimates(DATA_DIR /"vIndicators.dat", criterion_extend);
@@ -938,6 +985,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate 3-center Coulomb integrals (overlap-density):\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "overlap_density", timing_enabled);
 
         const string outfile = DATA_DIR / "OVERLAP_DENSITY";
         const string restartfile = DATA_DIR / "RESTART_3";
@@ -969,6 +1017,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate 4-center Coulomb integrals (overlap-overlap):\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "overlap_overlap", timing_enabled);
 
         const string outfile = DATA_DIR / "OVERLAP_OVERLAP";
         const string restartfile = DATA_DIR / "RESTART_4";
@@ -995,6 +1044,7 @@ int main(int argc, char *argv[]) {
     // filter and merge Coulomb integrals into one single file
     cout << setprecision(12);
     if (rank==0) {
+        wo_timing::ScopedTimer timer(timing, "merge_coulomb", timing_enabled);
         cout << "\n----------------------------------------------------------------------\n";
         cout << "\nReopen, filter and merge all Coulomb integrals into a single file:\n";
         cout << "\n----------------------------------------------------------------------\n";
@@ -1120,6 +1170,7 @@ int main(int argc, char *argv[]) {
             cout << "\nCalculate local field effects integrals:\n";
             cout << "\n----------------------------------------------------------------------\n";
         }
+        wo_timing::ScopedTimer timer(timing, "local_field_effects", timing_enabled);
 
         calc_local_field_effects(backend_ref, BATCH_SIZE, vWannMap, cWannMap, shells, NUM_OMP_THREADS, ABSOLUTE_CHARGE_THRESHOLD, DATA_DIR);
 
@@ -1157,6 +1208,12 @@ int main(int argc, char *argv[]) {
 
 
     // clean up
+    if (total_timer) {
+        total_timer.reset();
+    }
+    if (timing_enabled && rank==0) {
+        timing.printSummary(cout);
+    }
     MPI_Finalize();
     return 0;
 }

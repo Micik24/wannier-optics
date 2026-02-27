@@ -141,6 +141,11 @@ ABSOLUTE_CHARGE_THRESHOLD = 0.1\n\
 # Increase if additional threads are available for improved parallel performance.\n\
 NUM_OMP_THREADS = 1\n\
 \n\
+# Use deterministic scheduling for reproducible runs (recommended for CPU vs GPU comparisons).\n\
+# This disables dynamic OpenMP teams and enforces static scheduling.\n\
+# 1 = enable, 0 = disable\n\
+DETERMINISTIC = 1\n\
+\n\
 # Supercell dimensions for Fourier-space calculations (applies only to\n\
 # Coulomb integrals). Helps prevent aliasing in Fourier space but should\n\
 # only be adjusted if necessary, as larger values significantly increase\n\

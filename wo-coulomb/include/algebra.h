@@ -10,6 +10,8 @@
 
 #include <iostream>
 #include <cassert>
+#include <cstdlib>
+#include <type_traits>
 #include <math.h>
 #include <vector>
 
@@ -26,14 +28,14 @@ template <typename T> int sgn(T val) {
     return (T(0) < val) - (val < T(0));
 }
 
-double det3x3(vector< vector<double> > const& mat){
+inline double det3x3(vector< vector<double> > const& mat){
     return mat[0][0]*mat[1][1]*mat[2][2] + mat[0][1]*mat[1][2]*mat[2][0] + mat[0][2]*mat[1][0]*mat[2][1]
         - mat[2][0]*mat[1][1]*mat[0][2] - mat[1][0]*mat[0][1]*mat[2][2] - mat[0][0]*mat[2][1]*mat[1][2];
 
 }
 
 
-double det3x3(double const mat[3][3]){
+inline double det3x3(double const mat[3][3]){
     return mat[0][0]*mat[1][1]*mat[2][2] + mat[0][1]*mat[1][2]*mat[2][0] + mat[0][2]*mat[1][0]*mat[2][1]
         - mat[2][0]*mat[1][1]*mat[0][2] - mat[1][0]*mat[0][1]*mat[2][2] - mat[0][0]*mat[2][1]*mat[1][2];
 
@@ -49,7 +51,7 @@ T crossProduct(T const& vect_A, T const& vect_B)
     return cross_P;
 }
 
-double dotProduct(double const vect_A[], double const vect_B[])
+inline double dotProduct(double const vect_A[], double const vect_B[])
 {
     double product = 0;
 
@@ -59,7 +61,7 @@ double dotProduct(double const vect_A[], double const vect_B[])
     return product;
 }
 
-double dotProduct(vector<double> const& vect_A, vector<double> const& vect_B)
+inline double dotProduct(vector<double> const& vect_A, vector<double> const& vect_B)
 {
     double product = 0;
     if (vect_A.size() != vect_B.size()) {
@@ -73,7 +75,7 @@ double dotProduct(vector<double> const& vect_A, vector<double> const& vect_B)
 }
 
 
-vector< vector<double> > invMat3x3(vector< vector<double> > const& mat){
+inline vector< vector<double> > invMat3x3(vector< vector<double> > const& mat){
 
     // check if matrix is a 3x3 matrix
     assert(mat.size() == 3);
@@ -111,7 +113,7 @@ vector< vector<double> > invMat3x3(vector< vector<double> > const& mat){
 //     inv[2][2] = (mat[0][0]*mat[1][1] - mat[0][1]*mat[1][0]) / det;
 // }
 
-vector< vector<double> > matMul3x3(vector< vector<double> > const& A, vector< vector<double> > const& B){
+inline vector< vector<double> > matMul3x3(vector< vector<double> > const& A, vector< vector<double> > const& B){
     vector< vector<double> > C(3);
     for (int i=0; i<3; i++) {
         C[i] = vector<double>{0,0,0};
@@ -127,7 +129,7 @@ vector< vector<double> > matMul3x3(vector< vector<double> > const& A, vector< ve
     return C;
 }
 
-void matMul3x3(double const A[3][3], double const B[3][3], double C[3][3]){
+inline void matMul3x3(double const A[3][3], double const B[3][3], double C[3][3]){
     for (int i=0; i<3; i++){
         for (int j=0; j<3; j++){
             C[i][j] = 0.0;
@@ -163,7 +165,7 @@ vector<double> inline matVecMul3x3(vector< vector<double> > const& A, vector<dou
     return res;
 }
 
-vector<double> matVecMul3x3(vector< vector<double> > const& A, vector<int> const& v){
+inline vector<double> matVecMul3x3(vector< vector<double> > const& A, vector<int> const& v){
     vector<double> res{0,0,0};
 
     for (int i=0; i<3; i++){
@@ -174,7 +176,7 @@ vector<double> matVecMul3x3(vector< vector<double> > const& A, vector<int> const
     return res;
 }
 
-vector< vector<double> > transpose3x3(const vector< vector<double> >& A){
+inline vector< vector<double> > transpose3x3(const vector< vector<double> >& A){
     vector< vector<double> > res(3);
     for (int i=0; i<3; i++){
         res[i] = vector<double>{0,0,0};
@@ -187,7 +189,7 @@ vector< vector<double> > transpose3x3(const vector< vector<double> >& A){
     return res;
 }
 
-void printMat3x3(double const A[3][3]){
+inline void printMat3x3(double const A[3][3]){
     for (int i=0; i<3; i++){
         for (int j=0; j<3; j++){
             cout << "\t" << A[i][j];
@@ -197,7 +199,7 @@ void printMat3x3(double const A[3][3]){
 }
 
 
-void printMat3x3(vector<vector<double>> const& A){
+inline void printMat3x3(vector<vector<double>> const& A){
     for (int i=0; i<3; i++){
         for (int j=0; j<3; j++){
             cout << "\t" << A[i][j];
@@ -206,7 +208,7 @@ void printMat3x3(vector<vector<double>> const& A){
     }
 }
 
-double L2Norm(vector<double> const& v) {
+inline double L2Norm(vector<double> const& v) {
     double norm = 0;
     for (auto c:v) norm = norm + c*c;
     return sqrt(norm);

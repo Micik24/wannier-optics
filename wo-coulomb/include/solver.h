@@ -17,6 +17,7 @@
 #include <complex>
 #include <vector>
 #include <map>
+#include <memory>
 #include <fftw3.h>
 #include <float.h>  // for definition of DBL_MAX
 #include <math.h>

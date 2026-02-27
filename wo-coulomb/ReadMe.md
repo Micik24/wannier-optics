@@ -50,3 +50,49 @@ $R_D = 0$, $R_c = S_1$, $R_v = S_2$
 $$\tilde{M}^*_{c_1 v_1 S}(e_q)  = \sqrt{\frac{4\pi e^2}{\epsilon_0\epsilon_r}} e_q \int d^3x \, w\_{c_1 0}(x) x w\_{v_1,-S}(x) $$
 
 Please note that the prefactor might not be contained.
+
+
+## Determinism, Correctness Tests, Benchmarks
+
+### Determinism and pinning
+For reproducible CPU baselines (useful for CPU vs GPU comparisons), enable deterministic OpenMP scheduling:
+
+- Config file: `DETERMINISTIC = 1` (default in new configs)
+- Environment override: `WO_DETERMINISTIC=1` (forces deterministic behavior regardless of config)
+
+Recommended pinning for stable performance:
+
+```bash
+export OMP_PROC_BIND=close
+export OMP_PLACES=cores
+export OMP_DYNAMIC=FALSE
+export OMP_SCHEDULE=static
+```
+
+Enable a timing + memory summary (rank 0 only) with:
+
+```bash
+export WO_TIMING=1
+```
+
+### Correctness tests (small/medium)
+Two deterministic CPU correctness tests are provided:
+
+```bash
+./build/tests/runTests.x --gtest_filter=CorrectnessSmall.*:CorrectnessMedium.*
+```
+
+Or use the helper script:
+
+```bash
+./tests/run_correctness.sh
+```
+
+### Benchmarks (CPU)
+Build the benchmark binary (built by default) and run small + medium baselines:
+
+```bash
+./bench/run_benchmarks.sh --threads 1 --iters 1
+```
+
+Results are written to `wo-coulomb/bench/results.csv`.
