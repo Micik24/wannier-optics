@@ -42,6 +42,7 @@ target_include_directories(${WO_COULOMB_CPU_TARGET} PUBLIC
 target_link_libraries(${WO_COULOMB_CPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
 
 if (WO_COULOMB_BUILD_GPU)
+    find_package(CUDAToolkit REQUIRED)
     add_executable(${WO_COULOMB_GPU_TARGET}
         ${WO_COULOMB_COMMON_SOURCES}
         src/backend/gpu/backend_gpu.cpp
@@ -52,7 +53,7 @@ if (WO_COULOMB_BUILD_GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/external
         PkgConfig::FFTW
     )
-    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW CUDA::cudart)
 endif()
 
 if (WO_COULOMB_BUILD_BENCH)

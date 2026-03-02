@@ -808,6 +808,7 @@ private:
                                             //!< shell or not and how many values of integrals for this shell are already known.
 
     vector<vector<vector<int>>> lastTasks;
+    size_t finished_tuples = 0;
 
     /**
      * @brief Returns next integral for a given tuple_id and increments the curser
@@ -891,8 +892,10 @@ private:
      * @param tuple_id
      */
     void setFinished(size_t tuple_id) {
+        if (cursers[tuple_id][0] < 0) return;
         cursers[tuple_id][0] = -1;
         cursers[tuple_id][1] = 0;
+        finished_tuples++;
     }
 
 
@@ -988,6 +991,8 @@ protected:
 
         // tuples are already initialized at this point (usually by constructors of derived classes.)
 
+        finished_tuples = 0;
+
         // initialize cursers
         cursers = vector<vector<int>>(tuples.size());
         for (size_t i=0; i<tuples.size(); i++) cursers[i] = vector<int>{0,0};
@@ -1008,6 +1013,13 @@ protected:
             if (j>=tuples.size()) j=0;
         }
         nextTuple = j;
+    }
+
+    void recountFinishedTuples() {
+        finished_tuples = 0;
+        for (const auto& curser : cursers) {
+            if (curser[0] < 0) finished_tuples++;
+        }
     }
 
 public:
@@ -1116,10 +1128,14 @@ public:
         // }
 
         if (verbose) {
+            size_t total = tuples.size();
+            size_t done = finished_tuples;
+            int percent = total ? static_cast<int>((done * 100) / total) : 100;
             cout << "\r"
+                << "Progress: " << percent << "% (" << done << "/" << total << " tuples);  "
                 << "Solved integrals: " << solved_ints.size() << ";  "
                 << "max value of batch: " << maxValue << "eV;  "
-                << "next tuple: " << nextTuple << " of " << tuples.size()  // TODO: maybe print number of relevant integrals
+                << "next tuple: " << nextTuple << " of " << total  // TODO: maybe print number of relevant integrals
                 << flush;
         }
     }
@@ -1260,6 +1276,7 @@ public:
         this->setKnownIntegrals(integrals);
         this->resetInternalState();
         this->cursers= new_cursers;
+        this->recountFinishedTuples();
 
         return true;
     }
@@ -1754,6 +1771,7 @@ class LocalFieldEffectsScheduler : public Scheduler
     vector<int> cursers;            //!< next tuple2 for given tuple1 (size = tuples.size)
 
     chrono::steady_clock::time_point startTime;  //!< to measure performance
+    size_t finished_tuples = 0;
 
     /**
      * @brief Returns next integral for a given tuple1 (Density) and increments the curser
@@ -1787,7 +1805,7 @@ class LocalFieldEffectsScheduler : public Scheduler
                 // update curser
                 cursers[tuple]++;
                 if (cursers[tuple] >= int(tuples.size())) {
-                    cursers[tuple] = -1;  // mark tuple as finished
+                    markFinished(tuple);
                 }
 
                 return i;
@@ -1796,7 +1814,7 @@ class LocalFieldEffectsScheduler : public Scheduler
             // update curser
             cursers[tuple]++;
             if (cursers[tuple] >= int(tuples.size())) {
-                cursers[tuple] = -1;  // mark tuple as finished
+                markFinished(tuple);
             }
 
         }
@@ -1849,6 +1867,19 @@ class LocalFieldEffectsScheduler : public Scheduler
         nextTuple = j;
     }
 
+    void markFinished(int tuple) {
+        if (cursers[tuple] < 0) return;
+        cursers[tuple] = -1;
+        finished_tuples++;
+    }
+
+    void recountFinishedTuples() {
+        finished_tuples = 0;
+        for (auto curser : cursers) {
+            if (curser < 0) finished_tuples++;
+        }
+    }
+
 public:
 
     LocalFieldEffectsScheduler(
@@ -1890,6 +1921,7 @@ public:
         for (size_t i=0; i<tuples.size(); i++) {
             cursers[i] = 0;
         }
+        finished_tuples = 0;
 
         cout << "tuples.size() = " << tuples.size() << endl;
 
@@ -1976,10 +2008,14 @@ public:
         // }
 
         if (verbose) {
+            size_t total = tuples.size();
+            size_t done = finished_tuples;
+            int percent = total ? static_cast<int>((done * 100) / total) : 100;
             cout << "\r"
+                << "Progress: " << percent << "% (" << done << "/" << total << " tuples);  "
                 << "Solved integrals: " << solved_ints.size() << ";  "
                 << "max value of batch: " << maxValue << "eV;  "
-                << "next tuple: " << nextTuple << " of " << tuples.size()
+                << "next tuple: " << nextTuple << " of " << total
                 << flush;
         }
     }
@@ -2107,6 +2143,7 @@ public:
         // actually set state
         this->tuples= new_tuples;
         this->cursers= new_cursers;
+        this->recountFinishedTuples();
         this->setKnownIntegrals(integrals);
         this->initializeWorker();
 
