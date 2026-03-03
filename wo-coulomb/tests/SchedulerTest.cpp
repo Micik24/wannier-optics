@@ -498,7 +498,9 @@ TEST(SchedulerTest, OverlapDensityScheduler) {
         ABSCHARGE_THRESHOLD, DISTANCE_THRESHOLD, ENERGY_THRESHOLD,
         "OverlapOverlap");
 
-    test_scheduler_basics(myScheduler, num_worker, batch_size, 0, true);
+    // Coulomb schedulers intentionally store only one representative of a
+    // Hermitian pair; conjugates are generated in the final merge step.
+    test_scheduler_basics(myScheduler, num_worker, batch_size);
 
     // TODO: additional tests
 }

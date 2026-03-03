@@ -13,11 +13,13 @@
 #include "potential.h"
 #include "algebra.h"
 #include "coulombIntegral.h"
+#include "backend/fft_executor.h"
 
 #include <complex>
 #include <vector>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <fftw3.h>
 #include <float.h>  // for definition of DBL_MAX
 #include <math.h>
@@ -391,12 +393,17 @@ private:
     int N;
     vector<int> dim, supercell;
 
-    fftw_plan p_f1, p_f2;
+    std::shared_ptr<FftExecutorFactory> fft_factory;
+    std::unique_ptr<FftExecutor> fft_f1;
+    std::unique_ptr<FftExecutor> fft_f2;
     fftw_complex* f1;           //!< fourier transformed densities (between electron and hole), cached
     fftw_complex* f2;           //!< fourier transformed densities (between electron and hole), cached
 
 public:
-    LocalFieldEffectsSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap)
+    LocalFieldEffectsSolver(
+        map< int,WannierFunction > const& newVWannMap,
+        map< int,WannierFunction > const& newCWannMap,
+        std::shared_ptr<FftExecutorFactory> fft_factory_=nullptr)
     : Solver("LocalFieldEffects", newVWannMap, newCWannMap), recMesh{newVWannMap.begin()->second.getMeshgrid()},
       supercell{vector<int>(3)}
     {
@@ -426,18 +433,11 @@ public:
         f1 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
         f2 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
 
-        // plan needs to be created before initializing inputs !!!
-        // dimensions are reversed because our datagrids are in Fortran (column-major) format!
-        // planing is not thread safe unless void fftw_make_planner_thread_safe(void); is invoked first!!!
-        #pragma omp critical
-        {
-            p_f1 = fftw_plan_dft_3d(dim[2], dim[1], dim[0], f1, f1, FFTW_FORWARD, FFTW_ESTIMATE); // f1(+q) FORWARD corresponds to exp(-iqx)
-            p_f2 = fftw_plan_dft_3d(dim[2], dim[1], dim[0], f2, f2, FFTW_BACKWARD, FFTW_ESTIMATE);  // f2(-q)  FORWARD corresponds to exp(+iqx)
-        }
+        fft_factory = fft_factory_ ? fft_factory_ : make_fftw_executor_factory();
+        fft_f1 = fft_factory->create(dim, FftBufferView{f1, FftBufferLocation::Host}, FftDirection::Forward);  // f1(+q) exp(-iqx)
+        fft_f2 = fft_factory->create(dim, FftBufferView{f2, FftBufferLocation::Host}, FftDirection::Inverse);  // f2(-q) exp(+iqx)
     }
     ~LocalFieldEffectsSolver() {
-        fftw_destroy_plan(p_f1);
-        fftw_destroy_plan(p_f2);
         if (f1!=nullptr) fftw_free(f1);
         if (f2!=nullptr) fftw_free(f2);
     }
@@ -499,7 +499,7 @@ public:
                 }else{
                     // Fourier transform wave functions
                     msg(" perform Fourier transform");
-                    fftw_execute(p_f1);
+                    fft_f1->exec();
                 }
             }
 
@@ -527,7 +527,7 @@ public:
                 }else{
                     // Fourier transform wave functions
                     msg(" perform Fourier transform");
-                    fftw_execute(p_f2);
+                    fft_f2->exec();
                 }
             }
 
@@ -608,7 +608,9 @@ private:
     map<int, double> const cMeanDensity;
     double RELATIVE_PERMITTIVITY, SCREENING_ALPHA;
 
-    fftw_plan p_f1, p_f2;
+    std::shared_ptr<FftExecutorFactory> fft_factory;
+    std::unique_ptr<FftExecutor> fft_f1;
+    std::unique_ptr<FftExecutor> fft_f2;
     fftw_complex* f1{};       //!< fourier transformed densities (cached)
     fftw_complex* f2{};       //!< fourier transformed densities (cached)
 
@@ -651,7 +653,8 @@ protected:
 
     YukawaSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap, const Potential* pot,
          map<int, double> const& newVMeanDensity, map<int, double> const& newCMeanDensity,
-        double RELATIVE_PERMITTIVITY_, double SCREENING_ALPHA_)
+        double RELATIVE_PERMITTIVITY_, double SCREENING_ALPHA_,
+        std::shared_ptr<FftExecutorFactory> fft_factory_=nullptr)
     : Solver("Fourier",newVWannMap, newCWannMap), recMesh{newVWannMap.begin()->second.getMeshgrid()}, potential{pot},
       vMeanDensity{newVMeanDensity}, cMeanDensity{newCMeanDensity},
       RELATIVE_PERMITTIVITY(RELATIVE_PERMITTIVITY_), SCREENING_ALPHA(SCREENING_ALPHA_)
@@ -672,12 +675,10 @@ protected:
         f2 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
         f1 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
 
-        // create plans
-        #pragma omp critical
-        {
-            p_f1 = fftw_plan_dft_3d(recMesh.getDim()[2], recMesh.getDim()[1], recMesh.getDim()[0], f1, f1, FFTW_FORWARD, FFTW_ESTIMATE); // f1(+q) FORWARD corresponds to exp(-iqx)
-            p_f2 = fftw_plan_dft_3d(recMesh.getDim()[2], recMesh.getDim()[1], recMesh.getDim()[0], f2, f2, FFTW_BACKWARD, FFTW_ESTIMATE);  // f2(-q)  FORWARD corresponds to exp(+iqx)
-        }
+        fft_factory = fft_factory_ ? fft_factory_ : make_fftw_executor_factory();
+        vector<int> dims = recMesh.getDim();
+        fft_f1 = fft_factory->create(dims, FftBufferView{f1, FftBufferLocation::Host}, FftDirection::Forward);  // f1(+q) exp(-iqx)
+        fft_f2 = fft_factory->create(dims, FftBufferView{f2, FftBufferLocation::Host}, FftDirection::Inverse);  // f2(-q) exp(+iqx)
     }
 
 public:
@@ -685,8 +686,10 @@ public:
     // use generalized model screening that depends on the Wannier functions
     YukawaSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap,
         map<int, double> const& newVMeanDensity, map<int, double> const& newCMeanDensity,
-        double RELATIVE_PERMITTIVITY_, double SCREENING_ALPHA_)
-    : YukawaSolver(newVWannMap, newCWannMap, nullptr, newVMeanDensity, newCMeanDensity, RELATIVE_PERMITTIVITY_, SCREENING_ALPHA_)
+        double RELATIVE_PERMITTIVITY_, double SCREENING_ALPHA_,
+        std::shared_ptr<FftExecutorFactory> fft_factory_=nullptr)
+    : YukawaSolver(newVWannMap, newCWannMap, nullptr, newVMeanDensity, newCMeanDensity,
+        RELATIVE_PERMITTIVITY_, SCREENING_ALPHA_, fft_factory_)
     {
         // check if MeanDensities are compatible with WannMap
         if (((!checkMaps(vWannMap, vMeanDensity)) || (!checkMaps(cWannMap, cMeanDensity)))) {
@@ -696,15 +699,15 @@ public:
     }
 
     // use a predefined potential (either yukawa potential or gauss potential for testing)
-    YukawaSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap, const Potential* pot)
-    : YukawaSolver(newVWannMap, newCWannMap, pot, {}, {}, 0.0, 0.0)
+    YukawaSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap, const Potential* pot,
+        std::shared_ptr<FftExecutorFactory> fft_factory_=nullptr)
+    : YukawaSolver(newVWannMap, newCWannMap, pot, {}, {}, 0.0, 0.0, fft_factory_)
     {
         if (pot->getName() == "Coulomb3D") throw runtime_error("YukawaSolver cannot work with Coulomb potentials. Use the CoulombSolver instead!");
     }
 
     ~YukawaSolver() {
         // clean up
-        fftw_destroy_plan(p_f1); fftw_destroy_plan(p_f2);
         fftw_free(f1); fftw_free(f2);
     }
 
@@ -757,7 +760,7 @@ public:
                 }else{
                     // Fourier transform wave functions
                     msg(" perform Fourier transform");
-                    fftw_execute(p_f2);
+                    fft_f2->exec();
                 }
             }
 
@@ -784,7 +787,7 @@ public:
 
                     // Fourier transform wave functions
                     msg(" perform Fourier transform");
-                    fftw_execute(p_f1);
+                    fft_f1->exec();
                 }
             }
 
@@ -872,7 +875,9 @@ private:
     const CoulombPotential potential;      //!< interaction potential
 
 
-    fftw_plan p_f1, p_f2;
+    std::shared_ptr<FftExecutorFactory> fft_factory;
+    std::unique_ptr<FftExecutor> fft_f1;
+    std::unique_ptr<FftExecutor> fft_f2;
     fftw_complex* f1{};                       //!< fourier transformed densities (cached)
     fftw_complex* f2{};                       //!< fourier transformed densities (cached)
 
@@ -972,7 +977,7 @@ protected:
 
         // Fourier transform wave functions
         msg(" perform Fourier transform");
-        fftw_execute(p_f2);
+        fft_f2->exec();
 
         // check if overall charge of density-gaussian is actually zero
         if (abs(f2[0][0]*dV) > THRESHOLD_DENSITY) {
@@ -1011,7 +1016,7 @@ protected:
 
         // Fourier transform wave functions
         msg(" perform Fourier transform");
-        fftw_execute(p_f1);
+        fft_f1->exec();
 
         // check if overall charge of density-gaussian is actually zero
         if (abs(f1[0][0]*dV) > THRESHOLD_DENSITY) {
@@ -1083,7 +1088,8 @@ protected:
 
 
 public:
-    CoulombSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap, bool wrapAux_=true)
+    CoulombSolver(map< int,WannierFunction > const& newVWannMap, map< int,WannierFunction > const& newCWannMap,
+        bool wrapAux_=true, std::shared_ptr<FftExecutorFactory> fft_factory_=nullptr)
     : Solver("FourierGauss",newVWannMap, newCWannMap), wrapAux(wrapAux_), realMesh{newVWannMap.begin()->second.getMeshgrid()},
       recMesh{ newVWannMap.begin()->second.getMeshgrid() }
     {
@@ -1143,18 +1149,15 @@ public:
         f2 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
         f1 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
 
-        // create plans
-        #pragma omp critical
-        {
-            p_f1 = fftw_plan_dft_3d(recMesh.getDim()[2], recMesh.getDim()[1], recMesh.getDim()[0], f1, f1, FFTW_FORWARD, FFTW_ESTIMATE); // f1(+q) FORWARD corresponds to exp(-iqx)
-            p_f2 = fftw_plan_dft_3d(recMesh.getDim()[2], recMesh.getDim()[1], recMesh.getDim()[0], f2, f2, FFTW_BACKWARD, FFTW_ESTIMATE);  // f2(-q)  FORWARD corresponds to exp(+iqx)
-        }
+        fft_factory = fft_factory_ ? fft_factory_ : make_fftw_executor_factory();
+        vector<int> dims = recMesh.getDim();
+        fft_f1 = fft_factory->create(dims, FftBufferView{f1, FftBufferLocation::Host}, FftDirection::Forward);  // f1(+q) exp(-iqx)
+        fft_f2 = fft_factory->create(dims, FftBufferView{f2, FftBufferLocation::Host}, FftDirection::Inverse);  // f2(-q) exp(+iqx)
     }
 
     ~CoulombSolver() {
         // clean up
         //fftw_cleanup_threads();
-        fftw_destroy_plan(p_f1); fftw_destroy_plan(p_f2);
         fftw_free(f1); fftw_free(f2);
     }
 
