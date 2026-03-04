@@ -16,11 +16,13 @@ set(WO_COULOMB_GPU_TARGET ${PROJECT_NAME}-gpu.x)
 set(WO_COULOMB_COMMON_SOURCES
     src/main.cpp
     src/backend/backend_factory.cpp
+    src/backend/cpu/fft_executor_fftw.cpp
 )
 
 add_executable(${WO_COULOMB_CPU_TARGET}
     ${WO_COULOMB_COMMON_SOURCES}
     src/backend/cpu/backend_cpu.cpp
+    src/backend/cpu/density_metrics_cpu.cpp
 )
 target_compile_definitions(${WO_COULOMB_CPU_TARGET} PRIVATE WO_BACKEND_CPU=1)
 
@@ -42,10 +44,17 @@ target_include_directories(${WO_COULOMB_CPU_TARGET} PUBLIC
 target_link_libraries(${WO_COULOMB_CPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
 
 if (WO_COULOMB_BUILD_GPU)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
     find_package(CUDAToolkit REQUIRED)
     add_executable(${WO_COULOMB_GPU_TARGET}
         ${WO_COULOMB_COMMON_SOURCES}
         src/backend/gpu/backend_gpu.cpp
+        src/backend/gpu/fft_executor_cufft.cpp
+        src/backend/gpu/density_metrics_gpu.cpp
+        src/backend/gpu/density_metrics_kernels.cu
     )
     target_compile_definitions(${WO_COULOMB_GPU_TARGET} PRIVATE WO_BACKEND_GPU=1)
     target_include_directories(${WO_COULOMB_GPU_TARGET} PUBLIC
@@ -53,17 +62,51 @@ if (WO_COULOMB_BUILD_GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/external
         PkgConfig::FFTW
     )
-    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW CUDA::cudart)
+    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW CUDA::cudart CUDA::cufft)
 endif()
 
 if (WO_COULOMB_BUILD_BENCH)
-    add_executable(wo-coulomb-bench.x bench/bench_coulomb.cpp)
+    add_executable(wo-coulomb-bench.x
+        bench/bench_coulomb.cpp
+        src/backend/cpu/fft_executor_fftw.cpp
+        src/backend/cpu/density_metrics_cpu.cpp
+    )
     target_include_directories(wo-coulomb-bench.x PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external
         PkgConfig::FFTW
     )
     target_link_libraries(wo-coulomb-bench.x PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+
+    add_executable(wo-coulomb-bench-lfe-density.x
+        bench/bench_lfe_density.cpp
+        src/backend/cpu/density_metrics_cpu.cpp
+    )
+    target_include_directories(wo-coulomb-bench-lfe-density.x PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external
+        PkgConfig::FFTW
+    )
+    target_link_libraries(wo-coulomb-bench-lfe-density.x PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW)
+
+    if (WO_COULOMB_BUILD_GPU)
+        add_executable(wo-coulomb-bench-lfe-density-gpu.x
+            bench/bench_lfe_density.cpp
+            src/backend/gpu/density_metrics_gpu.cpp
+            src/backend/gpu/density_metrics_kernels.cu
+        )
+        target_include_directories(wo-coulomb-bench-lfe-density-gpu.x PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/external
+            PkgConfig::FFTW
+        )
+        target_link_libraries(wo-coulomb-bench-lfe-density-gpu.x PUBLIC
+            MPI::MPI_CXX
+            OpenMP::OpenMP_CXX
+            PkgConfig::FFTW
+            CUDA::cudart
+        )
+    endif()
 endif()
 
 # tell the program its git commit id

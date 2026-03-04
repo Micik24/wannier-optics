@@ -6,15 +6,25 @@ find_package(MPI REQUIRED)
 
 # Locate GTest
 find_package(GTest REQUIRED)
+find_package(CUDAToolkit QUIET)
 include_directories(${GTEST_INCLUDE_DIRS})
 
 # Link runTests with what we want to test and the GTest and pthread library
-add_executable(runTests.x tests.cpp)
+add_executable(runTests.x
+    tests.cpp
+    ../src/backend/cpu/fft_executor_fftw.cpp
+    ../src/backend/cpu/density_metrics_cpu.cpp
+)
 target_include_directories(runTests.x PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../external
 )
 target_link_libraries(runTests.x PUBLIC ${GTEST_LIBRARIES} MPI::MPI_CXX OpenMP::OpenMP_CXX ${FFTW_THREADS_LIB} ${FFTW_LIB})
+if (CUDAToolkit_FOUND)
+    target_sources(runTests.x PRIVATE ../src/backend/gpu/fft_executor_cufft.cpp)
+    target_link_libraries(runTests.x PUBLIC CUDA::cudart CUDA::cufft)
+    target_compile_definitions(runTests.x PRIVATE WO_TEST_CUDA=1)
+endif()
 target_link_libraries(runTests.x )
 
 # libaries

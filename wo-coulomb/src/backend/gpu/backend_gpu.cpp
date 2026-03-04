@@ -1,4 +1,5 @@
 #include "backend/backend.h"
+#include "backend/fft_executor.h"
 
 #include <cuda_runtime.h>
 #include <mpi.h>
@@ -35,53 +36,6 @@ int get_local_rank()
     }
     return -1;
 }
-
-class GpuSolverBase : public Solver
-{
-public:
-    GpuSolverBase(
-        const std::string& name,
-        std::map<int, WannierFunction> const& vWannMap,
-        std::map<int, WannierFunction> const& cWannMap)
-        : Solver(name, vWannMap, cWannMap)
-    {
-        const RealMeshgrid* mesh = vWannMap.begin()->second.getMeshgrid();
-        num_points = static_cast<size_t>(mesh->getNumDataPoints());
-
-        if (num_points == 0) {
-            throw std::runtime_error("GPU solver cannot allocate zero-sized buffers.");
-        }
-
-        checkCuda(cudaMalloc(reinterpret_cast<void**>(&device_f1), sizeof(double2) * num_points),
-            "cudaMalloc(device_f1)");
-        checkCuda(cudaMalloc(reinterpret_cast<void**>(&device_f2), sizeof(double2) * num_points),
-            "cudaMalloc(device_f2)");
-    }
-
-    ~GpuSolverBase() override
-    {
-        if (device_f1) {
-            cudaFree(device_f1);
-        }
-        if (device_f2) {
-            cudaFree(device_f2);
-        }
-    }
-
-    void calculate(
-        std::vector<Integral>&,
-        const bool = true,
-        const unsigned int = 1,
-        const unsigned int = 1) override
-    {
-        throw std::runtime_error("GPU solver not implemented yet.");
-    }
-
-private:
-    double2* device_f1{};
-    double2* device_f2{};
-    size_t num_points{};
-};
 }  // namespace
 
 class GpuBackend final : public Backend
@@ -103,32 +57,38 @@ public:
 
         checkCuda(cudaSetDevice(device_index), "cudaSetDevice");
         checkCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+
+        fft_factory = make_cufft_executor_factory();
     }
 
     std::unique_ptr<Solver> createCoulombSolver(
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap) override
     {
-        return std::make_unique<GpuSolverBase>("GpuCoulomb", vWannMap, cWannMap);
+        return std::make_unique<CoulombSolver>(vWannMap, cWannMap, true, fft_factory);
     }
 
     std::unique_ptr<Solver> createLocalFieldEffectsSolver(
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap) override
     {
-        return std::make_unique<GpuSolverBase>("GpuLocalFieldEffects", vWannMap, cWannMap);
+        return std::make_unique<LocalFieldEffectsSolver>(vWannMap, cWannMap, fft_factory);
     }
 
     std::unique_ptr<Solver> createYukawaSolver(
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap,
-        std::map<int, double> const&,
-        std::map<int, double> const&,
-        double,
-        double) override
+        std::map<int, double> const& vMeanDensity,
+        std::map<int, double> const& cMeanDensity,
+        double relativePermittivity,
+        double screeningAlpha) override
     {
-        return std::make_unique<GpuSolverBase>("GpuYukawa", vWannMap, cWannMap);
+        return std::make_unique<YukawaSolver>(
+            vWannMap, cWannMap, vMeanDensity, cMeanDensity, relativePermittivity, screeningAlpha, fft_factory);
     }
+
+private:
+    std::shared_ptr<FftExecutorFactory> fft_factory;
 };
 
 std::unique_ptr<Backend> make_gpu_backend()

@@ -24,6 +24,7 @@
  */
 
 #include "wannierfunction.h"
+#include "backend/density_metrics.h"
 #include "mpi_tags.h"
 #include <mpi.h>
 #include <fftw3.h>
@@ -1281,26 +1282,100 @@ inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,
     const RealMeshgrid* mesh = cWannMap.begin()->second.getMeshgrid();
     map<Density_descr, Density_indicator> indicators{};
     int counter = -1;
+    const bool use_gpu_metrics = density_metrics_gpu_available();
+    if (rank == 0 && use_gpu_metrics) {
+        cout << "Use GPU batch absCharge metrics for LFE indicators.\n";
+    }
 
+    // Build local list of (c, v) pairs assigned to this MPI rank.
+    std::vector<std::pair<int, int>> local_pairs{};
     for (auto itr1 = cWannMap.begin(); itr1 != cWannMap.end(); itr1++) {
-        size_t c1 = itr1->first;
-        WannierFunction const& cWann = itr1->second;
-
         for (auto itr2 = vWannMap.begin(); itr2 != vWannMap.end(); itr2++) {
-            size_t v1 = itr2->first;
-
             counter++;
-            if (counter >= num_worker) counter=0;
+            if (counter >= num_worker) counter = 0;
             if (counter != rank) continue;
+            local_pairs.push_back({itr1->first, itr2->first});
+        }
+    }
 
-            WannierFunction const& vWann = itr2->second;
+    if (use_gpu_metrics) {
+        const size_t max_specs_per_batch = max(size_t(1), density_metrics_recommended_max_specs());
+        if (rank == 0) {
+            cout << "LFE GPU absCharge max specs per launch: " << max_specs_per_batch << endl;
+        }
 
-            // cout << "rank = " << rank << " c1 = " << c1 << ", v2 = " << v1 << endl;
+        // Active mask stores per-pair early-stop state (semantics preserved).
+        std::vector<char> active(local_pairs.size(), 1);
+        size_t active_count = local_pairs.size();
+
+        for (auto const& shell : shells) {
+            if (active_count == 0) break;
+            if (shell.size() == 0) continue;
+
+            const size_t shell_size = shell.size();
+            const size_t max_pairs_per_launch = max(size_t(1), max_specs_per_batch / shell_size);
+
+            std::vector<size_t> active_idx{};
+            active_idx.reserve(active_count);
+            for (size_t t = 0; t < local_pairs.size(); ++t) {
+                if (active[t]) active_idx.push_back(t);
+            }
+
+            for (size_t a0 = 0; a0 < active_idx.size(); a0 += max_pairs_per_launch) {
+                const size_t a1 = min(a0 + max_pairs_per_launch, active_idx.size());
+                const size_t chunk_pairs = a1 - a0;
+
+                std::vector<DensityMetricSpec> specs{};
+                specs.reserve(chunk_pairs * shell_size);
+                std::vector<size_t> pair_local_idx(chunk_pairs);
+
+                for (size_t j = 0; j < chunk_pairs; ++j) {
+                    const size_t t = active_idx[a0 + j];
+                    pair_local_idx[j] = t;
+                    const auto& pair = local_pairs[t];
+
+                    for (auto const& R : shell) {
+                        DensityMetricSpec spec{};
+                        spec.idx1 = pair.first;
+                        spec.idx2 = pair.second;
+                        spec.R = std::array<int, 3>{R[0], R[1], R[2]};
+                        specs.push_back(spec);
+                    }
+                }
+
+                const std::vector<double> abs_charge = compute_abs_charge_batch_gpu(
+                    DensityMetricKind::TransitionCv, cWannMap, vWannMap, specs);
+
+                for (size_t j = 0; j < chunk_pairs; ++j) {
+                    const size_t t = pair_local_idx[j];
+                    const auto& pair = local_pairs[t];
+                    const size_t off = j * shell_size;
+
+                    double shell_max = 0.0;
+                    for (size_t k = 0; k < shell_size; ++k) {
+                        const vector<int>& R = shell[k];
+                        const double q = abs_charge[off + k];
+                        indicators.insert({Density_descr(pair.first, pair.second, R), Density_indicator(0.0, 0.0, 0.0, q, -1)});
+                        shell_max = max(shell_max, q);
+                    }
+
+                    if (shell_max < ABSCHARGE_THRESHOLD) {
+                        active[t] = 0;
+                        active_count--;
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback CPU path with unchanged semantics.
+        for (size_t i = 0; i < local_pairs.size(); ++i) {
+            const int c1 = local_pairs[i].first;
+            const int v1 = local_pairs[i].second;
+            WannierFunction const& cWann = cWannMap.at(c1);
+            WannierFunction const& vWann = vWannMap.at(v1);
 
             double maxMonopole = 1.0;
             for (auto const& shell : shells) {
-                // cout << "rank = " << rank << " new Shell: " << shell.size() << " maxMonopole: " << maxMonopole << endl;
-
                 if (maxMonopole < ABSCHARGE_THRESHOLD) break;
 
                 maxMonopole = 0.0;
@@ -1312,11 +1387,8 @@ inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,
 
                     Density_descr ids = Density_descr(c1,v1,R);
                     unique_ptr<double[], free_deleter>density{ joinedDensity(cWann, vWann, R) };
-                    // cout << c1 << " " << v1 << " " << R[0] << " " << R[1] << " " << R[2] << endl;
-
                     Monopole mono = getAbsMonopole(density.get(), mesh);
                     indicators.insert({ids,Density_indicator(mono.x,mono.y,mono.z, mono.charge, -1)});
-
                     maxMonopole = max(maxMonopole, mono.charge);
                 }
             }

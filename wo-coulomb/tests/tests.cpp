@@ -18,6 +18,9 @@
 #include "DensityTest.cpp"
 #include "CorrectnessSmallMediumTest.cpp"
 #include "CHGCARTest.cpp"
+#ifdef WO_TEST_CUDA
+#include "GpuCpuFftTest.cpp"
+#endif
 
 
 using namespace std;

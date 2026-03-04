@@ -1,5 +1,6 @@
 #include "backend/backend.h"
 #include "backend/cpu/solver_cpu.h"
+#include "backend/fft_executor.h"
 
 #include <memory>
 
@@ -10,14 +11,16 @@ public:
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap) override
     {
-        return std::make_unique<CoulombSolver>(vWannMap, cWannMap);
+        auto fft_factory = make_fftw_executor_factory();
+        return std::make_unique<CoulombSolver>(vWannMap, cWannMap, true, fft_factory);
     }
 
     std::unique_ptr<Solver> createLocalFieldEffectsSolver(
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap) override
     {
-        return std::make_unique<LocalFieldEffectsSolver>(vWannMap, cWannMap);
+        auto fft_factory = make_fftw_executor_factory();
+        return std::make_unique<LocalFieldEffectsSolver>(vWannMap, cWannMap, fft_factory);
     }
 
     std::unique_ptr<Solver> createYukawaSolver(
@@ -28,7 +31,9 @@ public:
         double relativePermittivity,
         double screeningAlpha) override
     {
-        return std::make_unique<YukawaSolver>(vWannMap, cWannMap, vMeanDensity, cMeanDensity, relativePermittivity, screeningAlpha);
+        auto fft_factory = make_fftw_executor_factory();
+        return std::make_unique<YukawaSolver>(
+            vWannMap, cWannMap, vMeanDensity, cMeanDensity, relativePermittivity, screeningAlpha, fft_factory);
     }
 };
 
