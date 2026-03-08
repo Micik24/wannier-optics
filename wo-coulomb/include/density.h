@@ -34,6 +34,8 @@
 #include <map>
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <limits>
 
 /**
  * Data structure for labels of a density (descriptors)
@@ -116,6 +118,30 @@ struct Density_indicator
 
     vector<double> toVector() const { return vector<double>{x,y,z,absCharge,extend}; }
 };
+
+inline bool should_stop_by_shell_max(
+    const double shell_max,
+    const double threshold,
+    const double rel_guard = 1e-12,
+    const double abs_eps = 0.0,
+    const double gray_zone_tol = 0.0)
+{
+    if (threshold <= 0.0) return false;
+
+    const double rel_guard_clamped = max(0.0, min(rel_guard, 0.999));
+    const double abs_eps_clamped = max(0.0, abs_eps);
+    const double gray_zone_tol_clamped = max(0.0, gray_zone_tol);
+
+    bool stop = false;
+    stop = stop || (shell_max < threshold * (1.0 - rel_guard_clamped));
+    stop = stop || (shell_max + abs_eps_clamped < threshold);
+
+    if (gray_zone_tol_clamped > 0.0 && std::abs(shell_max - threshold) < gray_zone_tol_clamped) {
+        stop = false;
+    }
+
+    return stop;
+}
 
 /**
  * @brief Calculates the (overlap) density of two Wannier functions
@@ -1073,7 +1099,15 @@ inline map<Density_descr,Density_indicator> calcIndicator_estimates(const map< i
  * @param ABSCHARGE_THRESHOLD   threshold for absolute charge
  * @return map<Density_descr,Density_indicator>*
  */
-inline map<Density_descr,Density_indicator> calcIndicator_estimates_parallel(map< int,WannierFunction > const& wannMap, vector<vector<vector<int>>> const& shells, const double criterion_extend, const double ABSCHARGE_THRESHOLD){
+inline map<Density_descr,Density_indicator> calcIndicator_estimates_parallel(
+    map< int,WannierFunction > const& wannMap,
+    vector<vector<vector<int>>> const& shells,
+    const double criterion_extend,
+    const double ABSCHARGE_THRESHOLD,
+    const double stop_rel_guard = 1e-12,
+    const double stop_abs_eps = 0.0,
+    const double stop_gray_zone_tol = 0.0)
+{
 
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1083,37 +1117,115 @@ inline map<Density_descr,Density_indicator> calcIndicator_estimates_parallel(map
 
     map<Density_descr, Density_indicator> indicators{};
     int counter = -1;
+    const bool use_gpu_metrics = density_metrics_gpu_available();
 
+    // Build local list of (id1,id2) pairs assigned to this MPI rank.
+    std::vector<std::pair<int, int>> local_pairs{};
     for (auto itr1 = wannMap.begin(); itr1 != wannMap.end(); itr1++) {
-        size_t v1 = itr1->first;
-        WannierFunction const& wann1 = itr1->second;
-
         for (auto itr2 = wannMap.begin(); itr2 != wannMap.end(); itr2++) {
-            size_t v2 = itr2->first;
-            //if (v2>v1) break;  // TODO: BUG make sure we do not calculate hermitian conjugated
-
             counter++;
-            if (counter >= num_worker) counter=0;
+            if (counter >= num_worker) counter = 0;
             if (counter != rank) continue;
+            local_pairs.push_back({itr1->first, itr2->first});
+        }
+    }
 
-            WannierFunction const& wann2 = itr2->second;
+    if (use_gpu_metrics) {
+        const size_t max_specs_per_batch = max(size_t(1), density_metrics_recommended_max_specs());
+        if (rank == 0) {
+            cout << "Use GPU batch absCharge+center metrics for Coulomb indicators.\n";
+            cout << "Coulomb indicator GPU max specs per launch: " << max_specs_per_batch << endl;
+        }
 
-            // cout << "rank = " << rank << " id1 = " << v1 << ", id2 = " << v2 << endl;
+        std::vector<char> active(local_pairs.size(), 1);
+        size_t active_count = local_pairs.size();
 
-            double maxMonopole = 1.0;
+        for (auto const& shell : shells) {
+            if (active_count == 0) break;
+            if (shell.size() == 0) continue;
+
+            const size_t shell_size = shell.size();
+            const size_t max_pairs_per_launch = max(size_t(1), max_specs_per_batch / shell_size);
+
+            std::vector<size_t> active_idx{};
+            active_idx.reserve(active_count);
+            for (size_t t = 0; t < local_pairs.size(); ++t) {
+                if (active[t]) active_idx.push_back(t);
+            }
+
+            for (size_t a0 = 0; a0 < active_idx.size(); a0 += max_pairs_per_launch) {
+                const size_t a1 = min(a0 + max_pairs_per_launch, active_idx.size());
+                const size_t chunk_pairs = a1 - a0;
+
+                std::vector<DensityMetricSpec> specs{};
+                specs.reserve(chunk_pairs * shell_size);
+                std::vector<size_t> pair_local_idx(chunk_pairs);
+
+                for (size_t j = 0; j < chunk_pairs; ++j) {
+                    const size_t t = active_idx[a0 + j];
+                    pair_local_idx[j] = t;
+                    const auto& pair = local_pairs[t];
+
+                    for (auto const& R : shell) {
+                        DensityMetricSpec spec{};
+                        spec.idx1 = pair.first;
+                        spec.idx2 = pair.second;
+                        spec.R = std::array<int, 3>{R[0], R[1], R[2]};
+                        specs.push_back(spec);
+                    }
+                }
+
+                const std::vector<DensityMoments> moments = compute_density_moments_batch_gpu(
+                    DensityMetricKind::SameBand, wannMap, wannMap, specs);
+
+                for (size_t j = 0; j < chunk_pairs; ++j) {
+                    const size_t t = pair_local_idx[j];
+                    const auto& pair = local_pairs[t];
+                    const size_t off = j * shell_size;
+
+                    double shell_max = 0.0;
+                    for (size_t k = 0; k < shell_size; ++k) {
+                        const vector<int>& R = shell[k];
+                        const auto& m = moments[off + k];
+                        const double q = m.abs_charge;
+
+                        double x = 0.0, y = 0.0, z = 0.0;
+                        if (q > 1e-16) {
+                            x = m.mx / q;
+                            y = m.my / q;
+                            z = m.mz / q;
+                        }
+
+                        indicators.insert({Density_descr(pair.first, pair.second, R), Density_indicator(x, y, z, q, -1)});
+                        shell_max = max(shell_max, q);
+                    }
+
+                    if (should_stop_by_shell_max(shell_max, ABSCHARGE_THRESHOLD, stop_rel_guard, stop_abs_eps, stop_gray_zone_tol)) {
+                        active[t] = 0;
+                        active_count--;
+                    }
+                }
+            }
+        }
+
+        // The scheduler currently does not use extend for Coulomb tuple generation.
+        // Keep a sentinel value for parity with LFE GPU path and avoid extra CPU recomputation.
+    } else {
+        for (size_t i = 0; i < local_pairs.size(); ++i) {
+            const int id1 = local_pairs[i].first;
+            const int id2 = local_pairs[i].second;
+            WannierFunction const& wann1 = wannMap.at(id1);
+            WannierFunction const& wann2 = wannMap.at(id2);
+
+            double maxMonopole = std::numeric_limits<double>::infinity();
             for (auto const& shell : shells) {
-
-                // cout << "rank = " << rank << " new Shell: " << shell.size() << " maxMonopole: " << maxMonopole << endl;
-
-                if (maxMonopole < ABSCHARGE_THRESHOLD) break;
+                if (should_stop_by_shell_max(maxMonopole, ABSCHARGE_THRESHOLD, stop_rel_guard, stop_abs_eps, stop_gray_zone_tol)) break;
 
                 maxMonopole = 0.0;
-                for (const vector<int> & R : shell) {
-
-                    Density_descr ids = Density_descr(v1,v2,R);
+                for (const vector<int>& R : shell) {
+                    Density_descr ids(id1, id2, R);
                     auto indicator = calc_indicator(wann1, wann2, R, criterion_extend);
                     indicators.insert({ids, indicator});
-
                     maxMonopole = max(maxMonopole, indicator.absCharge);
                 }
             }
@@ -1273,7 +1385,15 @@ inline map<Density_descr,Density_indicator> calcLFE_estimates(const map< int,Wan
  * @param ABSCHARGE_THRESHOLD
  * @return map<Density_descr,Density_indicator>*
  */
-inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,WannierFunction > const& cWannMap, map< int,WannierFunction > const& vWannMap, vector<vector<vector<int>>> const& shells, const double ABSCHARGE_THRESHOLD){
+inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(
+    map< int,WannierFunction > const& cWannMap,
+    map< int,WannierFunction > const& vWannMap,
+    vector<vector<vector<int>>> const& shells,
+    const double ABSCHARGE_THRESHOLD,
+    const double stop_rel_guard = 1e-12,
+    const double stop_abs_eps = 0.0,
+    const double stop_gray_zone_tol = 0.0)
+{
 
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1359,7 +1479,7 @@ inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,
                         shell_max = max(shell_max, q);
                     }
 
-                    if (shell_max < ABSCHARGE_THRESHOLD) {
+                    if (should_stop_by_shell_max(shell_max, ABSCHARGE_THRESHOLD, stop_rel_guard, stop_abs_eps, stop_gray_zone_tol)) {
                         active[t] = 0;
                         active_count--;
                     }
@@ -1374,9 +1494,9 @@ inline map<Density_descr,Density_indicator> calcLFE_estimates_parallel(map< int,
             WannierFunction const& cWann = cWannMap.at(c1);
             WannierFunction const& vWann = vWannMap.at(v1);
 
-            double maxMonopole = 1.0;
+            double maxMonopole = std::numeric_limits<double>::infinity();
             for (auto const& shell : shells) {
-                if (maxMonopole < ABSCHARGE_THRESHOLD) break;
+                if (should_stop_by_shell_max(maxMonopole, ABSCHARGE_THRESHOLD, stop_rel_guard, stop_abs_eps, stop_gray_zone_tol)) break;
 
                 maxMonopole = 0.0;
                 for (const vector<int> & R : shell) {

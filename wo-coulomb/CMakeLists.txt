@@ -23,6 +23,8 @@ add_executable(${WO_COULOMB_CPU_TARGET}
     ${WO_COULOMB_COMMON_SOURCES}
     src/backend/cpu/backend_cpu.cpp
     src/backend/cpu/density_metrics_cpu.cpp
+    src/backend/cpu/pre_fft_density_cpu.cpp
+    src/backend/cpu/transition_dipole_cpu.cpp
 )
 target_compile_definitions(${WO_COULOMB_CPU_TARGET} PRIVATE WO_BACKEND_CPU=1)
 
@@ -52,9 +54,12 @@ if (WO_COULOMB_BUILD_GPU)
     add_executable(${WO_COULOMB_GPU_TARGET}
         ${WO_COULOMB_COMMON_SOURCES}
         src/backend/gpu/backend_gpu.cpp
+        src/backend/gpu/solver_gpu.cu
         src/backend/gpu/fft_executor_cufft.cpp
         src/backend/gpu/density_metrics_gpu.cpp
         src/backend/gpu/density_metrics_kernels.cu
+        src/backend/gpu/pre_fft_density_gpu.cu
+        src/backend/gpu/transition_dipole_gpu.cu
     )
     target_compile_definitions(${WO_COULOMB_GPU_TARGET} PRIVATE WO_BACKEND_GPU=1)
     target_include_directories(${WO_COULOMB_GPU_TARGET} PUBLIC
@@ -62,7 +67,7 @@ if (WO_COULOMB_BUILD_GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/external
         PkgConfig::FFTW
     )
-    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW CUDA::cudart CUDA::cufft)
+    target_link_libraries(${WO_COULOMB_GPU_TARGET} PUBLIC MPI::MPI_CXX OpenMP::OpenMP_CXX PkgConfig::FFTW CUDA::cudart CUDA::cufft CUDA::cublas)
 endif()
 
 if (WO_COULOMB_BUILD_BENCH)
@@ -101,6 +106,22 @@ if (WO_COULOMB_BUILD_BENCH)
             PkgConfig::FFTW
         )
         target_link_libraries(wo-coulomb-bench-lfe-density-gpu.x PUBLIC
+            MPI::MPI_CXX
+            OpenMP::OpenMP_CXX
+            PkgConfig::FFTW
+            CUDA::cudart
+        )
+
+        add_executable(wo-coulomb-bench-pre-fft-gpu.x
+            bench/bench_pre_fft_gpu.cpp
+            src/backend/gpu/pre_fft_density_gpu.cu
+        )
+        target_include_directories(wo-coulomb-bench-pre-fft-gpu.x PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/external
+            PkgConfig::FFTW
+        )
+        target_link_libraries(wo-coulomb-bench-pre-fft-gpu.x PUBLIC
             MPI::MPI_CXX
             OpenMP::OpenMP_CXX
             PkgConfig::FFTW

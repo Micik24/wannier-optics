@@ -6,6 +6,7 @@
 #include "density.h"
 #include "potential.h"
 #include "backend/backend.h"
+#include "backend/transition_dipole.h"
 #include "filehandler.h"
 #include "scheduler.h"
 #include "parallel_computation.h"
@@ -82,6 +83,7 @@ void calcScreening(Backend& backend, Scheduler const* myScheduler, map< int,Wann
     }
 
     run_parallel_calculations(*impl, yukawa_scheduler.get(), NUM_OMP_THREADS, yukawa_outfile, yukawa_restartfile);
+    impl.reset();
 
     if (rank==0) {
         cout << "Create superposition of Coulomb and Yukawa integrals...\n";
@@ -135,7 +137,8 @@ void calcScreening(Backend& backend, Scheduler const* myScheduler, map< int,Wann
 
 void calc_transition(shared_ptr<RealMeshgrid> const& mesh, map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap,
                     const vector<vector<double>>& pos_c, const vector<vector<double>>& pos_v, const map<int,int>& wId_to_arrayId_c,
-                    const map<int,int>& wId_to_arrayId_v, const int NUM_OMP_THREADS, bool ENABLE_TRANSITION_CORRECTIONS=true)
+                    const map<int,int>& wId_to_arrayId_v, const int NUM_OMP_THREADS, bool ENABLE_TRANSITION_CORRECTIONS=true,
+                    bool ENABLE_GPU_TRANSITION=true)
 {
     const string outfile = "TRANSITION";
     int rank, num_worker;
@@ -208,75 +211,141 @@ void calc_transition(shared_ptr<RealMeshgrid> const& mesh, map< int,WannierFunct
     counter = 0;
     int progress = 0;
     vector<vector<double>> unitcell_t = transpose3x3(cWannMap.begin()->second.getUnitcell());
-    for (auto& dipole: dipoles){
+    bool gpu_done = false;
 
-        auto itr = vWannMap.find(dipole.getIdv());
-        if (itr == vWannMap.end()) throw runtime_error("valence Wannier function not found!");
-        WannierFunction const& valence = itr->second;
-
-        itr = cWannMap.find(dipole.getIdc());
-        if (itr == cWannMap.end()) throw runtime_error("conduction Wannier function not found!");
-        WannierFunction const& cond = itr->second;
-
-        vector<int> shift = dipole.getShift();
-        vector<int> negativeShift = {-shift[0],-shift[1],-shift[2]};
-        vector<double> vec_shift = matVecMul3x3(unitcell_t, negativeShift);
-
-        int v = wId_to_arrayId_v.at(dipole.getIdv());
-        int c = wId_to_arrayId_c.at(dipole.getIdc());
-
-        const vector<double>& mono_val = pos_v[v];
-        const vector<double>& mono_cond= pos_c[c];
-
-        vector<double> value={0.0,0.0,0.0};
-
-        unique_ptr<double[], free_deleter>density{ joinedDensity(cond, valence, negativeShift) };  // can also be negative
-
-        // if (isZero(density,N)) {
-        //     delete density;
-        //     dipoles[n]->setDipole(dipole);   // zero
-        //     printResult(dipoles[n]);
-        //     continue;
-        // }
-
-        // calculate usual dipole moment
-        double dx=0.0;
-        double dy=0.0;
-        double dz=0.0;
-        omp_set_num_threads(NUM_OMP_THREADS);
-        #pragma omp parallel for shared(density, XX, YY, ZZ) firstprivate(N,dV) reduction(+:dx) reduction(+:dy) reduction(+:dz)
-        for (int i=0; i<N; i++) {
-            dx += density[i]*XX[i]*dV;
-            dy += density[i]*YY[i]*dV;
-            dz += density[i]*ZZ[i]*dV;
-        }
-        value[0] = dx;
-        value[1] = dy;
-        value[2] = dz;
-
-        // use correction of dipole operator for slightly not orthogonal WF
-        if (ENABLE_TRANSITION_CORRECTIONS)
-        {
-            // overlap of valence and conduction WF (should be very small)
-            double overlap = 0.0;
-            for (int i=0.0; i<N; i++){
-                overlap += density[i] * dV;
-            }
-
-            // make corrections due to non-orthogonality
-            for (size_t j=0; j<3;j++) {
-                value[j] -= 0.5*overlap*( vec_shift[j] + mono_val[j] + mono_cond[j]);
-            }
-        }
-
-        dipole.setDipole(value);
-        counter++;
-        progress++;
-
+    if (ENABLE_GPU_TRANSITION && transition_dipole_gpu_available()) {
         if (rank==0) {
-            if (counter>=10) {
-                counter=0;
-                cout << "Progress: " << progress*100.0/dipoles.size() << " %\t\t\r" << flush;
+            cout << "Use GPU GEMM path for transition dipoles.\n";
+        }
+
+        try {
+            vector<const double*> c_values(cWannMap.size(), nullptr);
+            vector<const double*> v_values(vWannMap.size(), nullptr);
+
+            for (const auto& [id, wf] : cWannMap) {
+                c_values.at(wId_to_arrayId_c.at(id)) = wf.getValue();
+            }
+            for (const auto& [id, wf] : vWannMap) {
+                v_values.at(wId_to_arrayId_v.at(id)) = wf.getValue();
+            }
+
+            vector<OpticalDipole*> dipole_refs;
+            vector<TransitionDipoleTask> tasks;
+            dipole_refs.reserve(dipoles.size());
+            tasks.reserve(dipoles.size());
+
+            for (auto& dipole : dipoles) {
+                const vector<int> shift = dipole.getShift();
+                tasks.push_back(TransitionDipoleTask{
+                    wId_to_arrayId_c.at(dipole.getIdc()),
+                    wId_to_arrayId_v.at(dipole.getIdv()),
+                    array<int,3>{shift[0], shift[1], shift[2]}
+                });
+                dipole_refs.push_back(&dipole);
+            }
+
+            const vector<TransitionDipoleValue> results = compute_transition_dipoles_gpu(
+                c_values,
+                v_values,
+                mesh->getDim(),
+                cWannMap.begin()->second.getLatticeInUnitcellBasis(),
+                vWannMap.begin()->second.getLatticeInUnitcellBasis(),
+                dV,
+                XX,
+                YY,
+                ZZ,
+                pos_c,
+                pos_v,
+                unitcell_t,
+                tasks,
+                ENABLE_TRANSITION_CORRECTIONS);
+
+            if (results.size() != dipole_refs.size()) {
+                throw runtime_error("GPU transition path returned unexpected number of results.");
+            }
+
+            for (size_t i=0; i<dipole_refs.size(); i++) {
+                dipole_refs[i]->setDipole(vector<double>{results[i].dx, results[i].dy, results[i].dz});
+                counter++;
+                progress++;
+
+                if (rank==0 && counter>=1000) {
+                    counter=0;
+                    cout << "Progress: " << progress*100.0/dipole_refs.size() << " %\t\t\r" << flush;
+                }
+            }
+            gpu_done = true;
+        } catch (const exception& e) {
+            if (rank==0) {
+                cout << "\n[WARN] GPU transition path failed, fallback to CPU: " << e.what() << endl;
+            }
+        }
+    }
+
+    if (!gpu_done) {
+        for (auto& dipole: dipoles){
+
+            auto itr = vWannMap.find(dipole.getIdv());
+            if (itr == vWannMap.end()) throw runtime_error("valence Wannier function not found!");
+            WannierFunction const& valence = itr->second;
+
+            itr = cWannMap.find(dipole.getIdc());
+            if (itr == cWannMap.end()) throw runtime_error("conduction Wannier function not found!");
+            WannierFunction const& cond = itr->second;
+
+            vector<int> shift = dipole.getShift();
+            vector<int> negativeShift = {-shift[0],-shift[1],-shift[2]};
+            vector<double> vec_shift = matVecMul3x3(unitcell_t, negativeShift);
+
+            int v = wId_to_arrayId_v.at(dipole.getIdv());
+            int c = wId_to_arrayId_c.at(dipole.getIdc());
+
+            const vector<double>& mono_val = pos_v[v];
+            const vector<double>& mono_cond= pos_c[c];
+
+            vector<double> value={0.0,0.0,0.0};
+
+            unique_ptr<double[], free_deleter>density{ joinedDensity(cond, valence, negativeShift) };  // can also be negative
+
+            // calculate usual dipole moment
+            double dx=0.0;
+            double dy=0.0;
+            double dz=0.0;
+            omp_set_num_threads(NUM_OMP_THREADS);
+            #pragma omp parallel for shared(density, XX, YY, ZZ) firstprivate(N,dV) reduction(+:dx) reduction(+:dy) reduction(+:dz)
+            for (int i=0; i<N; i++) {
+                dx += density[i]*XX[i]*dV;
+                dy += density[i]*YY[i]*dV;
+                dz += density[i]*ZZ[i]*dV;
+            }
+            value[0] = dx;
+            value[1] = dy;
+            value[2] = dz;
+
+            // use correction of dipole operator for slightly not orthogonal WF
+            if (ENABLE_TRANSITION_CORRECTIONS)
+            {
+                // overlap of valence and conduction WF (should be very small)
+                double overlap = 0.0;
+                for (int i=0.0; i<N; i++){
+                    overlap += density[i] * dV;
+                }
+
+                // make corrections due to non-orthogonality
+                for (size_t j=0; j<3;j++) {
+                    value[j] -= 0.5*overlap*( vec_shift[j] + mono_val[j] + mono_cond[j]);
+                }
+            }
+
+            dipole.setDipole(value);
+            counter++;
+            progress++;
+
+            if (rank==0) {
+                if (counter>=10) {
+                    counter=0;
+                    cout << "Progress: " << progress*100.0/dipoles.size() << " %\t\t\r" << flush;
+                }
             }
         }
     }
@@ -358,12 +427,24 @@ void calc_custom_file(Backend& backend, int BATCH_SIZE, map< int,string > const&
     }
 
     run_parallel_calculations(*impl, file_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+    impl.reset();
     if (ENABLE_SCREENING_MODEL)
         calcScreening(backend, file_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 }
 
 
-void calc_local_field_effects(Backend& backend, int BATCH_SIZE, map< int,WannierFunction > const& vWannMap, map< int,WannierFunction > const& cWannMap, vector<vector<vector<int>>> const& shells, const int NUM_OMP_THREADS, const double ABSOLUTE_CHARGE_THRESHOLD, filesystem::path const& DATA_DIR)
+void calc_local_field_effects(
+    Backend& backend,
+    int BATCH_SIZE,
+    map< int,WannierFunction > const& vWannMap,
+    map< int,WannierFunction > const& cWannMap,
+    vector<vector<vector<int>>> const& shells,
+    const int NUM_OMP_THREADS,
+    const double ABSOLUTE_CHARGE_THRESHOLD,
+    const double ABSCHARGE_STOP_REL_GUARD,
+    const double ABSCHARGE_STOP_ABS_EPS,
+    const double ABSCHARGE_STOP_GRAY_TOL,
+    filesystem::path const& DATA_DIR)
 {
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -373,24 +454,32 @@ void calc_local_field_effects(Backend& backend, int BATCH_SIZE, map< int,Wannier
     const string outfile = DATA_DIR / "LOCALFIELDEFFECTS";
     const string restartfile = DATA_DIR / "RESTART_LFE";
 
-    // setup solver
-    auto impl = backend.createLocalFieldEffectsSolver(vWannMap, cWannMap);
-
 
     // get Indicator parameters for valence WF
-    map<Density_descr,Density_indicator> lfe_indicators{ readIndicator_estimates(DATA_DIR / "lfe_indicators.dat", ABSOLUTE_CHARGE_THRESHOLD)};
+    map<Density_descr,Density_indicator> lfe_indicators{
+        readIndicator_estimates(
+            DATA_DIR / "lfe_indicators.dat",
+            -1.0,
+            ABSOLUTE_CHARGE_THRESHOLD,
+            "lfe")
+    };
     if (lfe_indicators.size() == 0) {
         if (rank==0) cout << "Prepare Indicator for LFE (this may take a while)\n";
         chrono::steady_clock::time_point time_calcIndicator_start = chrono::steady_clock::now();
-        lfe_indicators = calcLFE_estimates_parallel(cWannMap, vWannMap, shells, ABSOLUTE_CHARGE_THRESHOLD);
+        lfe_indicators = calcLFE_estimates_parallel(
+            cWannMap, vWannMap, shells, ABSOLUTE_CHARGE_THRESHOLD,
+            ABSCHARGE_STOP_REL_GUARD, ABSCHARGE_STOP_ABS_EPS, ABSCHARGE_STOP_GRAY_TOL);
 
         if (rank==0) {
             chrono::steady_clock::time_point time_calcIndicator_stop = chrono::steady_clock::now();
             cout << "Done. Time spent (min): " << chrono::duration_cast<chrono::minutes>(time_calcIndicator_stop - time_calcIndicator_start).count() << "\n";
             cout << "Save lfe_indicators.dat\n";
-            saveIndicator_estimates(DATA_DIR / "lfe_indicators.dat", lfe_indicators, ABSOLUTE_CHARGE_THRESHOLD);
+            saveIndicator_estimates(DATA_DIR / "lfe_indicators.dat", lfe_indicators, -1.0, ABSOLUTE_CHARGE_THRESHOLD, "lfe");
         }
     }
+
+    // Release persistent GPU buffers from indicator screening before allocating the LFE solver.
+    release_density_metrics_gpu_workspace();
 
     // setup scheduler
     unique_ptr<LocalFieldEffectsScheduler> lfe_scheduler{};
@@ -405,7 +494,10 @@ void calc_local_field_effects(Backend& backend, int BATCH_SIZE, map< int,Wannier
             BATCH_SIZE, num_worker, lfe_indicators, ABSOLUTE_CHARGE_THRESHOLD, restartfile, outfile);
     }
 
+    // setup solver
+    auto impl = backend.createLocalFieldEffectsSolver(vWannMap, cWannMap);
     run_parallel_calculations(*impl, lfe_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+    impl.reset();
 }
 
 
@@ -492,6 +584,7 @@ int main(int argc, char *argv[]) {
 
     // advanced settings
     const bool ENABLE_TRANSITION_CORRECTIONS = bool(stoi(ini.GetValue("general", "ENABLE_TRANSITION_CORRECTIONS", "1")));
+    const bool ENABLE_GPU_TRANSITION = bool(stoi(ini.GetValue("general", "ENABLE_GPU_TRANSITION", "1")));
     const double MONOPOLE_RELATIVE_ERROR_THRESHOLD = stod(ini.GetValue("general", "MONOPOLE_RELATIVE_ERROR_THRESHOLD", "0.05"));
     const double ELECTRON_HOLE_DISTANCE_THRESHOLD = stod(ini.GetValue("general", "ELECTRON_HOLE_DISTANCE_THRESHOLD", "10.0"));
     const double ENERGY_THRESHOLD = stod(ini.GetValue("general", "ENERGY_THRESHOLD", "0.001"));
@@ -506,6 +599,9 @@ int main(int argc, char *argv[]) {
     // hidden options:
     const bool NORMALIZE = bool(stoi(ini.GetValue("general", "NORMALIZE", "1")));
     const double criterion_extend = stod(ini.GetValue("general", "criterion_extend", "1e-2"));  // TODO: better name and better documentation
+    const double ABSCHARGE_STOP_REL_GUARD = stod(ini.GetValue("general", "ABSCHARGE_STOP_REL_GUARD", "1e-12"));
+    const double ABSCHARGE_STOP_ABS_EPS = stod(ini.GetValue("general", "ABSCHARGE_STOP_ABS_EPS", "0.0"));
+    const double ABSCHARGE_STOP_GRAY_TOL = stod(ini.GetValue("general", "ABSCHARGE_STOP_GRAY_TOL", "0.0"));
 
 
     const auto env_deterministic = wo_determinism::readEnvBool("WO_DETERMINISTIC");
@@ -540,6 +636,7 @@ int main(int argc, char *argv[]) {
         cout << "Technical / advanced settings: " << endl;
         cout << "MPI-Processes \t\t\t : " << num_worker << endl;
         cout << "NUM_OMP_THREADS \t\t : " << NUM_OMP_THREADS << endl;
+        cout << "ENABLE_GPU_TRANSITION \t\t : " << ENABLE_GPU_TRANSITION << endl;
         cout << "DETERMINISTIC \t\t\t : " << DETERMINISTIC;
         if (env_deterministic.has_value()) cout << " (env override)";
         cout << endl;
@@ -549,6 +646,9 @@ int main(int argc, char *argv[]) {
         cout << "ELECTRON_HOLE_DISTANCE_THRESHOLD : " << ELECTRON_HOLE_DISTANCE_THRESHOLD << endl;
         cout << "ENERGY_THRESHOLD \t\t : " << ENERGY_THRESHOLD << endl;
         cout << "criterion_extend \t\t : " << criterion_extend << endl;
+        cout << "ABSCHARGE_STOP_REL_GUARD \t : " << ABSCHARGE_STOP_REL_GUARD << endl;
+        cout << "ABSCHARGE_STOP_ABS_EPS \t\t : " << ABSCHARGE_STOP_ABS_EPS << endl;
+        cout << "ABSCHARGE_STOP_GRAY_TOL \t : " << ABSCHARGE_STOP_GRAY_TOL << endl;
         cout << "Supercell \t\t\t : ( " << Nsupercell[0] << ", " << Nsupercell[1] << ", "<< Nsupercell[2] << " )\n";
         cout << "Normalize WF \t\t\t : " << NORMALIZE << endl;
 
@@ -581,6 +681,39 @@ int main(int argc, char *argv[]) {
             cout << "\n\n##############################################################################################\n\n";
             cout << "[ERROR] Hear your master's voice:\n";
             cout << "[ERROR]    ENERGY_THRESHOLD needs to be larger than 0\n";
+            cout << "\n##############################################################################################\n\n";
+        }
+        MPI_Finalize();
+        exit(1);
+    }
+
+    if ((ABSCHARGE_STOP_REL_GUARD < 0.0) || (ABSCHARGE_STOP_REL_GUARD >= 1.0)) {
+        if (rank==0) {
+            cout << "\n\n##############################################################################################\n\n";
+            cout << "[ERROR] Hear your master's voice:\n";
+            cout << "[ERROR]    ABSCHARGE_STOP_REL_GUARD needs to be in [0,1)\n";
+            cout << "\n##############################################################################################\n\n";
+        }
+        MPI_Finalize();
+        exit(1);
+    }
+
+    if (ABSCHARGE_STOP_ABS_EPS < 0.0) {
+        if (rank==0) {
+            cout << "\n\n##############################################################################################\n\n";
+            cout << "[ERROR] Hear your master's voice:\n";
+            cout << "[ERROR]    ABSCHARGE_STOP_ABS_EPS needs to be non-negative\n";
+            cout << "\n##############################################################################################\n\n";
+        }
+        MPI_Finalize();
+        exit(1);
+    }
+
+    if (ABSCHARGE_STOP_GRAY_TOL < 0.0) {
+        if (rank==0) {
+            cout << "\n\n##############################################################################################\n\n";
+            cout << "[ERROR] Hear your master's voice:\n";
+            cout << "[ERROR]    ABSCHARGE_STOP_GRAY_TOL needs to be non-negative\n";
             cout << "\n##############################################################################################\n\n";
         }
         MPI_Finalize();
@@ -880,7 +1013,8 @@ int main(int argc, char *argv[]) {
             cout << "\n----------------------------------------------------------------------\n";
         }
         wo_timing::ScopedTimer timer(timing, "transition_matrix", timing_enabled);
-        calc_transition(mesh, vWannMap, cWannMap, pos_c, pos_v, wId_to_arrayId_c, wId_to_arrayId_v, NUM_OMP_THREADS, ENABLE_TRANSITION_CORRECTIONS);
+        calc_transition(mesh, vWannMap, cWannMap, pos_c, pos_v, wId_to_arrayId_c, wId_to_arrayId_v,
+            NUM_OMP_THREADS, ENABLE_TRANSITION_CORRECTIONS, ENABLE_GPU_TRANSITION);
     }
 
 
@@ -923,6 +1057,7 @@ int main(int argc, char *argv[]) {
 
         // run all calculations
         run_parallel_calculations(*impl, density_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+        impl.reset();
         if (ENABLE_SCREENING_MODEL)
             calcScreening(backend_ref, density_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 
@@ -942,30 +1077,34 @@ int main(int argc, char *argv[]) {
         wo_timing::ScopedTimer timer(timing, "prepare_indicators", timing_enabled);
 
         // get Indicator parameter for valence WF
-        vIndicators = readIndicator_estimates(DATA_DIR /"vIndicators.dat", criterion_extend);
+        vIndicators = readIndicator_estimates(DATA_DIR /"vIndicators.dat", criterion_extend, ABSOLUTE_CHARGE_THRESHOLD, "coulomb");
         if (vIndicators.size() == 0) {
             if (rank==0) cout << "Prepare Indicator for valence WF (this may take a while)\n";
             chrono::steady_clock::time_point time_calcIndicator_start = chrono::steady_clock::now();
-            vIndicators = calcIndicator_estimates_parallel(vWannMap, shells, criterion_extend, ABSOLUTE_CHARGE_THRESHOLD);
+            vIndicators = calcIndicator_estimates_parallel(
+                vWannMap, shells, criterion_extend, ABSOLUTE_CHARGE_THRESHOLD,
+                ABSCHARGE_STOP_REL_GUARD, ABSCHARGE_STOP_ABS_EPS, ABSCHARGE_STOP_GRAY_TOL);
             if (rank==0) {
                 chrono::steady_clock::time_point time_calcIndicator_stop = chrono::steady_clock::now();
                 cout << "Done. Time spent (min): " << chrono::duration_cast<chrono::minutes>(time_calcIndicator_stop - time_calcIndicator_start).count() << "\n";
                 cout << "Save vIndicators.dat\n";
-                saveIndicator_estimates(DATA_DIR / "vIndicators.dat", vIndicators, criterion_extend);
+                saveIndicator_estimates(DATA_DIR / "vIndicators.dat", vIndicators, criterion_extend, ABSOLUTE_CHARGE_THRESHOLD, "coulomb");
             }
         }
 
         // get Indicator parameter for conduction WF
-        cIndicators = readIndicator_estimates(DATA_DIR / "cIndicators.dat", criterion_extend);  // TODO only read if ABSOLUTE_CHARGE_THRESHOLD is the same
+        cIndicators = readIndicator_estimates(DATA_DIR / "cIndicators.dat", criterion_extend, ABSOLUTE_CHARGE_THRESHOLD, "coulomb");
         if (cIndicators.size() == 0) {
             if (rank==0) cout << "Prepare Indicator for conduction WF (this may take a while)\n";
             chrono::steady_clock::time_point time_calcIndicator_start = chrono::steady_clock::now();
-            cIndicators = calcIndicator_estimates_parallel(cWannMap, shells,criterion_extend, ABSOLUTE_CHARGE_THRESHOLD);
+            cIndicators = calcIndicator_estimates_parallel(
+                cWannMap, shells, criterion_extend, ABSOLUTE_CHARGE_THRESHOLD,
+                ABSCHARGE_STOP_REL_GUARD, ABSCHARGE_STOP_ABS_EPS, ABSCHARGE_STOP_GRAY_TOL);
             if (rank==0) {
                 chrono::steady_clock::time_point time_calcIndicator_stop = chrono::steady_clock::now();
                 cout << "Done. Time spent (min): " << chrono::duration_cast<chrono::minutes>(time_calcIndicator_stop - time_calcIndicator_start).count() << "\n";
                 cout << "Save cIndicators.dat\n";
-                saveIndicator_estimates(DATA_DIR /"cIndicators.dat", cIndicators, criterion_extend); // TODO save also ABSOLUTE_CHARGE_THRESHOLD
+                saveIndicator_estimates(DATA_DIR /"cIndicators.dat", cIndicators, criterion_extend, ABSOLUTE_CHARGE_THRESHOLD, "coulomb");
             }
         }
 
@@ -977,6 +1116,7 @@ int main(int argc, char *argv[]) {
             checkCompatibilityIndicator(cIndicators, cWannMap);
         }
     }
+    release_density_metrics_gpu_workspace();
 
     if (ENABLE_THREE_CENTER_INTEGRALS) // calculate overlap-overlap integrals
     {
@@ -1004,6 +1144,7 @@ int main(int argc, char *argv[]) {
 
         // run all calculations
         run_parallel_calculations(*impl, overlap_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+        impl.reset();
         if (ENABLE_SCREENING_MODEL)
             calcScreening(backend_ref, overlap_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 
@@ -1036,6 +1177,7 @@ int main(int argc, char *argv[]) {
 
         // run all calculations
         run_parallel_calculations(*impl, overlap_overlap_scheduler.get(), NUM_OMP_THREADS, outfile, restartfile);
+        impl.reset();
         if (ENABLE_SCREENING_MODEL)
             calcScreening(backend_ref, overlap_overlap_scheduler.get(), vWannMap, cWannMap, vMeanDensity, cMeanDensity, SCREENING_RELATIVE_PERMITTIVITY, SCREENING_ALPHA, outfile, restartfile, NUM_OMP_THREADS);
 
@@ -1172,7 +1314,9 @@ int main(int argc, char *argv[]) {
         }
         wo_timing::ScopedTimer timer(timing, "local_field_effects", timing_enabled);
 
-        calc_local_field_effects(backend_ref, BATCH_SIZE, vWannMap, cWannMap, shells, NUM_OMP_THREADS, ABSOLUTE_CHARGE_THRESHOLD, DATA_DIR);
+        calc_local_field_effects(
+            backend_ref, BATCH_SIZE, vWannMap, cWannMap, shells, NUM_OMP_THREADS, ABSOLUTE_CHARGE_THRESHOLD,
+            ABSCHARGE_STOP_REL_GUARD, ABSCHARGE_STOP_ABS_EPS, ABSCHARGE_STOP_GRAY_TOL, DATA_DIR);
 
         if (rank==0) {
             cout << "\n----------------------------------------------------------------------\n";

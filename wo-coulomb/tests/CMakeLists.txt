@@ -24,6 +24,13 @@ if (CUDAToolkit_FOUND)
     target_sources(runTests.x PRIVATE ../src/backend/gpu/fft_executor_cufft.cpp)
     target_link_libraries(runTests.x PUBLIC CUDA::cudart CUDA::cufft)
     target_compile_definitions(runTests.x PRIVATE WO_TEST_CUDA=1)
+    if (WO_COULOMB_BUILD_GPU)
+        target_sources(runTests.x PRIVATE
+            ../src/backend/gpu/pre_fft_density_gpu.cu
+            ../src/backend/gpu/solver_gpu.cu
+        )
+        target_link_libraries(runTests.x PUBLIC CUDA::cublas)
+    endif()
 endif()
 target_link_libraries(runTests.x )
 

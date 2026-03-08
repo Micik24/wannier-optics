@@ -20,6 +20,7 @@
 #include "CHGCARTest.cpp"
 #ifdef WO_TEST_CUDA
 #include "GpuCpuFftTest.cpp"
+#include "GpuSolverParityTest.cpp"
 #endif
 
 

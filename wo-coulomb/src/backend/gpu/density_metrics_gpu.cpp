@@ -3,9 +3,12 @@
 #include "density_metrics_kernels.h"
 
 #include <cuda_runtime.h>
+#include <mpi.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -22,6 +25,24 @@ void checkCuda(cudaError_t status, const char* what)
     throw std::runtime_error(msg.str());
 }
 
+int get_local_rank()
+{
+    const char* envs[] = {
+        "OMPI_COMM_WORLD_LOCAL_RANK",
+        "MV2_COMM_WORLD_LOCAL_RANK",
+        "SLURM_LOCALID",
+        "MPI_LOCALRANKID",
+        "PMI_LOCAL_RANK",
+    };
+    for (const char* env : envs) {
+        const char* value = std::getenv(env);
+        if (value && *value) {
+            return std::atoi(value);
+        }
+    }
+    return -1;
+}
+
 struct DeviceWannier
 {
     double* values = nullptr;
@@ -33,6 +54,19 @@ class GpuDensityMetricsContext
 public:
     GpuDensityMetricsContext()
     {
+        int rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+        int device_count = 0;
+        checkCuda(cudaGetDeviceCount(&device_count), "cudaGetDeviceCount");
+        if (device_count <= 0) {
+            throw std::runtime_error("No CUDA devices available.");
+        }
+
+        const int local_rank = get_local_rank();
+        const int device_index = (local_rank >= 0 ? local_rank : rank) % device_count;
+
+        checkCuda(cudaSetDevice(device_index), "cudaSetDevice");
         checkCuda(cudaStreamCreate(&stream_), "cudaStreamCreate");
     }
 
@@ -54,21 +88,29 @@ public:
         if (d_offsets_xyz_) cudaFree(d_offsets_xyz_);
         if (d_valid_) cudaFree(d_valid_);
         if (d_abs_charge_) cudaFree(d_abs_charge_);
+        if (d_mx_) cudaFree(d_mx_);
+        if (d_my_) cudaFree(d_my_);
+        if (d_mz_) cudaFree(d_mz_);
+        if (d_lattice_) cudaFree(d_lattice_);
+        if (d_origin_) cudaFree(d_origin_);
         if (h_abs_charge_) cudaFreeHost(h_abs_charge_);
+        if (h_mx_) cudaFreeHost(h_mx_);
+        if (h_my_) cudaFreeHost(h_my_);
+        if (h_mz_) cudaFreeHost(h_mz_);
         if (stream_) cudaStreamDestroy(stream_);
     }
 
-    std::vector<double> compute(
+    std::vector<DensityMoments> compute(
         DensityMetricKind kind,
         std::map<int, WannierFunction> const& cWannMap,
         std::map<int, WannierFunction> const& vWannMap,
         std::vector<DensityMetricSpec> const& specs)
     {
-        if (kind != DensityMetricKind::TransitionCv) {
-            throw std::runtime_error("Unsupported density metric kind.");
-        }
         if (specs.empty()) {
             return {};
+        }
+        if (kind != DensityMetricKind::TransitionCv && kind != DensityMetricKind::SameBand) {
+            throw std::runtime_error("Unsupported density metric kind.");
         }
 
         initMesh(cWannMap, vWannMap);
@@ -79,19 +121,28 @@ public:
         std::vector<int> h_offsets_xyz(specs.size() * 3, 0);
         std::vector<int> h_valid(specs.size(), 1);
 
+        const bool same_band = (kind == DensityMetricKind::SameBand);
+
         for (size_t i = 0; i < specs.size(); ++i) {
-            auto c_it = cWannMap.find(specs[i].idx1);
-            auto v_it = vWannMap.find(specs[i].idx2);
-            if (c_it == cWannMap.end() || v_it == vWannMap.end()) {
+            auto w1_it = cWannMap.find(specs[i].idx1);
+            if (w1_it == cWannMap.end()) {
                 throw std::runtime_error("Density metric spec references unknown Wannier index.");
             }
 
-            WannierFunction const& c_wann = c_it->second;
-            WannierFunction const& v_wann = v_it->second;
+            auto w2_it = same_band ? cWannMap.find(specs[i].idx2) : vWannMap.find(specs[i].idx2);
+            if (w2_it == (same_band ? cWannMap.end() : vWannMap.end())) {
+                throw std::runtime_error("Density metric spec references unknown Wannier index.");
+            }
+
+            WannierFunction const& w1 = w1_it->second;
+            WannierFunction const& w2 = w2_it->second;
+
+            if (!w1.isCompatible(w2)) {
+                throw std::runtime_error("Incompatible Wannier functions in density metric batch.");
+            }
 
             std::vector<int> Rvec{specs[i].R[0], specs[i].R[1], specs[i].R[2]};
-
-            const std::vector<double> supercell = c_wann.getLatticeInUnitcellBasis();
+            const std::vector<double> supercell = w1.getLatticeInUnitcellBasis();
             if ((std::round(supercell[0]) <= std::abs(Rvec[0])) ||
                 (std::round(supercell[1]) <= std::abs(Rvec[1])) ||
                 (std::round(supercell[2]) <= std::abs(Rvec[2]))) {
@@ -99,12 +150,11 @@ public:
                 continue;
             }
 
-            h_w1_ptrs[i] = ensureUploaded(c_wann, c_cache_, "conduction");
-            h_w2_ptrs[i] = ensureUploaded(v_wann, v_cache_, "valence");
+            h_w1_ptrs[i] = ensureUploaded(w1, c_cache_);
+            h_w2_ptrs[i] = same_band ? ensureUploaded(w2, c_cache_) : ensureUploaded(w2, v_cache_);
 
             const std::vector<int> offset =
-                v_wann.getMeshgrid()->getIndexOffset(Rvec, v_wann.getLatticeInUnitcellBasis());
-
+                w2.getMeshgrid()->getIndexOffset(Rvec, w2.getLatticeInUnitcellBasis());
             h_offsets_xyz[3 * i + 0] = offset[0];
             h_offsets_xyz[3 * i + 1] = offset[1];
             h_offsets_xyz[3 * i + 2] = offset[2];
@@ -122,20 +172,46 @@ public:
         checkCuda(cudaMemcpyAsync(d_valid_, h_valid.data(), sizeof(int) * specs.size(),
                       cudaMemcpyHostToDevice, stream_),
             "cudaMemcpyAsync(d_valid)");
+
         checkCuda(cudaMemsetAsync(d_abs_charge_, 0, sizeof(double) * specs.size(), stream_),
             "cudaMemsetAsync(d_abs_charge)");
+        checkCuda(cudaMemsetAsync(d_mx_, 0, sizeof(double) * specs.size(), stream_),
+            "cudaMemsetAsync(d_mx)");
+        checkCuda(cudaMemsetAsync(d_my_, 0, sizeof(double) * specs.size(), stream_),
+            "cudaMemsetAsync(d_my)");
+        checkCuda(cudaMemsetAsync(d_mz_, 0, sizeof(double) * specs.size(), stream_),
+            "cudaMemsetAsync(d_mz)");
 
-        launch_abs_charge_kernel(
+        launch_density_moments_kernel(
             d_w1_ptrs_, d_w2_ptrs_, d_offsets_xyz_, d_valid_,
-            static_cast<int>(specs.size()), dimx_, dimy_, dimz_, dV_, d_abs_charge_, stream_);
-        checkCuda(cudaGetLastError(), "launch_abs_charge_kernel");
+            static_cast<int>(specs.size()), dimx_, dimy_, dimz_, dV_,
+            d_lattice_, d_origin_, d_abs_charge_, d_mx_, d_my_, d_mz_, stream_);
+        checkCuda(cudaGetLastError(), "launch_density_moments_kernel");
 
         checkCuda(cudaMemcpyAsync(h_abs_charge_, d_abs_charge_, sizeof(double) * specs.size(),
                       cudaMemcpyDeviceToHost, stream_),
             "cudaMemcpyAsync(h_abs_charge)");
-        checkCuda(cudaStreamSynchronize(stream_), "cudaStreamSynchronize(abs_charge)");
+        checkCuda(cudaMemcpyAsync(h_mx_, d_mx_, sizeof(double) * specs.size(),
+                      cudaMemcpyDeviceToHost, stream_),
+            "cudaMemcpyAsync(h_mx)");
+        checkCuda(cudaMemcpyAsync(h_my_, d_my_, sizeof(double) * specs.size(),
+                      cudaMemcpyDeviceToHost, stream_),
+            "cudaMemcpyAsync(h_my)");
+        checkCuda(cudaMemcpyAsync(h_mz_, d_mz_, sizeof(double) * specs.size(),
+                      cudaMemcpyDeviceToHost, stream_),
+            "cudaMemcpyAsync(h_mz)");
+        checkCuda(cudaStreamSynchronize(stream_), "cudaStreamSynchronize(density_moments)");
 
-        return std::vector<double>(h_abs_charge_, h_abs_charge_ + specs.size());
+        std::vector<DensityMoments> out(specs.size());
+        for (size_t i = 0; i < specs.size(); ++i) {
+            out[i] = DensityMoments{
+                h_abs_charge_[i],
+                h_mx_[i],
+                h_my_[i],
+                h_mz_[i]
+            };
+        }
+        return out;
     }
 
 private:
@@ -163,6 +239,23 @@ private:
             N_ = static_cast<size_t>(dimx_) * dimy_ * dimz_;
             dV_ = c_mesh->getdV();
             initialized_ = true;
+
+            const auto lattice = c_mesh->getLattice();
+            const auto origin = c_mesh->getOrigin();
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    lattice_h_[3 * i + j] = lattice[i][j];
+                }
+                origin_h_[i] = origin[i];
+            }
+
+            checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_lattice_), sizeof(double) * 9), "cudaMalloc(d_lattice)");
+            checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_origin_), sizeof(double) * 3), "cudaMalloc(d_origin)");
+            checkCuda(cudaMemcpyAsync(d_lattice_, lattice_h_, sizeof(double) * 9, cudaMemcpyHostToDevice, stream_),
+                "cudaMemcpyAsync(d_lattice)");
+            checkCuda(cudaMemcpyAsync(d_origin_, origin_h_, sizeof(double) * 3, cudaMemcpyHostToDevice, stream_),
+                "cudaMemcpyAsync(d_origin)");
+            checkCuda(cudaStreamSynchronize(stream_), "cudaStreamSynchronize(mesh_metadata)");
             return;
         }
 
@@ -171,10 +264,7 @@ private:
         }
     }
 
-    const double* ensureUploaded(
-        WannierFunction const& wf,
-        std::unordered_map<int, DeviceWannier>& cache,
-        const char* label)
+    const double* ensureUploaded(WannierFunction const& wf, std::unordered_map<int, DeviceWannier>& cache)
     {
         auto it = cache.find(wf.getId());
         const double* host_values = wf.getValue();
@@ -201,7 +291,6 @@ private:
             it->second.host_values = host_values;
         }
 
-        (void)label;
         return it->second.values;
     }
 
@@ -216,7 +305,13 @@ private:
         if (d_offsets_xyz_) cudaFree(d_offsets_xyz_);
         if (d_valid_) cudaFree(d_valid_);
         if (d_abs_charge_) cudaFree(d_abs_charge_);
+        if (d_mx_) cudaFree(d_mx_);
+        if (d_my_) cudaFree(d_my_);
+        if (d_mz_) cudaFree(d_mz_);
         if (h_abs_charge_) cudaFreeHost(h_abs_charge_);
+        if (h_mx_) cudaFreeHost(h_mx_);
+        if (h_my_) cudaFreeHost(h_my_);
+        if (h_mz_) cudaFreeHost(h_mz_);
 
         checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_w1_ptrs_), sizeof(double*) * batch_size),
             "cudaMalloc(d_w1_ptrs)");
@@ -228,8 +323,20 @@ private:
             "cudaMalloc(d_valid)");
         checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_abs_charge_), sizeof(double) * batch_size),
             "cudaMalloc(d_abs_charge)");
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_mx_), sizeof(double) * batch_size),
+            "cudaMalloc(d_mx)");
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_my_), sizeof(double) * batch_size),
+            "cudaMalloc(d_my)");
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_mz_), sizeof(double) * batch_size),
+            "cudaMalloc(d_mz)");
         checkCuda(cudaMallocHost(reinterpret_cast<void**>(&h_abs_charge_), sizeof(double) * batch_size),
             "cudaMallocHost(h_abs_charge)");
+        checkCuda(cudaMallocHost(reinterpret_cast<void**>(&h_mx_), sizeof(double) * batch_size),
+            "cudaMallocHost(h_mx)");
+        checkCuda(cudaMallocHost(reinterpret_cast<void**>(&h_my_), sizeof(double) * batch_size),
+            "cudaMallocHost(h_my)");
+        checkCuda(cudaMallocHost(reinterpret_cast<void**>(&h_mz_), sizeof(double) * batch_size),
+            "cudaMallocHost(h_mz)");
 
         capacity_ = batch_size;
     }
@@ -240,6 +347,8 @@ private:
     int dimz_ = 0;
     size_t N_ = 0;
     double dV_ = 0.0;
+    double lattice_h_[9]{};
+    double origin_h_[3]{};
 
     std::unordered_map<int, DeviceWannier> c_cache_;
     std::unordered_map<int, DeviceWannier> v_cache_;
@@ -251,9 +360,32 @@ private:
     const double** d_w2_ptrs_ = nullptr;
     int* d_offsets_xyz_ = nullptr;
     int* d_valid_ = nullptr;
+    double* d_lattice_ = nullptr;
+    double* d_origin_ = nullptr;
     double* d_abs_charge_ = nullptr;
+    double* d_mx_ = nullptr;
+    double* d_my_ = nullptr;
+    double* d_mz_ = nullptr;
     double* h_abs_charge_ = nullptr;
+    double* h_mx_ = nullptr;
+    double* h_my_ = nullptr;
+    double* h_mz_ = nullptr;
 };
+
+std::unique_ptr<GpuDensityMetricsContext>& globalDensityMetricsContext()
+{
+    static std::unique_ptr<GpuDensityMetricsContext> context{};
+    return context;
+}
+
+GpuDensityMetricsContext& getDensityMetricsContext()
+{
+    auto& context = globalDensityMetricsContext();
+    if (!context) {
+        context = std::make_unique<GpuDensityMetricsContext>();
+    }
+    return *context;
+}
 
 }  // namespace
 
@@ -277,9 +409,9 @@ size_t density_metrics_recommended_max_specs()
     }
 
     // Per-spec buffers we allocate in the current implementation:
-    // d_w1_ptr, d_w2_ptr, d_offset(3 ints), d_valid, d_abs_charge, h_abs_charge(pinned).
+    // d_w1_ptr, d_w2_ptr, d_offset(3 ints), d_valid, 4x device moments, 4x pinned host moments.
     const size_t bytes_per_spec =
-        sizeof(double*) * 2 + sizeof(int) * 3 + sizeof(int) + sizeof(double) + sizeof(double);
+        sizeof(double*) * 2 + sizeof(int) * 3 + sizeof(int) + sizeof(double) * 8;
 
     // Keep this lightweight and safe: use at most 5% of currently free memory.
     const size_t mem_budget = free_mem / 20;
@@ -295,7 +427,12 @@ size_t density_metrics_recommended_max_specs()
     return max_specs;
 }
 
-std::vector<double> compute_abs_charge_batch_gpu(
+void release_density_metrics_gpu_workspace()
+{
+    globalDensityMetricsContext().reset();
+}
+
+std::vector<DensityMoments> compute_density_moments_batch_gpu(
     DensityMetricKind kind,
     std::map<int, WannierFunction> const& cWannMap,
     std::map<int, WannierFunction> const& vWannMap,
@@ -305,6 +442,19 @@ std::vector<double> compute_abs_charge_batch_gpu(
         throw std::runtime_error("No CUDA device available for GPU density metrics.");
     }
 
-    static GpuDensityMetricsContext context{};
-    return context.compute(kind, cWannMap, vWannMap, specs);
+    return getDensityMetricsContext().compute(kind, cWannMap, vWannMap, specs);
+}
+
+std::vector<double> compute_abs_charge_batch_gpu(
+    DensityMetricKind kind,
+    std::map<int, WannierFunction> const& cWannMap,
+    std::map<int, WannierFunction> const& vWannMap,
+    std::vector<DensityMetricSpec> const& specs)
+{
+    const auto moments = compute_density_moments_batch_gpu(kind, cWannMap, vWannMap, specs);
+    std::vector<double> out(moments.size(), 0.0);
+    for (size_t i = 0; i < moments.size(); ++i) {
+        out[i] = moments[i].abs_charge;
+    }
+    return out;
 }

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <regex>
+#include <sstream>
 
 #include "coulombIntegral.h"
 #include "wannierfunction.h"
@@ -711,8 +712,24 @@ map< int,WannierFunction > openAllWannierFunctions(const map< int,string >& mapp
 }
 
 
-bool saveIndicator_estimates(string const& filename, map<Density_descr,Density_indicator> const& indicators, const double extend_criterion) {  //TODO add ABSCHARGE_THRESHOLD
+constexpr int INDICATOR_CACHE_FORMAT_VERSION = 2;
 
+struct IndicatorCacheMeta
+{
+    int format_version = INDICATOR_CACHE_FORMAT_VERSION;
+    string kind = "generic";
+    double extend_criterion = -1.0;
+    double abscharge_threshold = -1.0;
+};
+
+bool saveIndicator_estimates(
+    string const& filename,
+    map<Density_descr,Density_indicator> const& indicators,
+    const double extend_criterion,
+    const double abscharge_threshold = -1.0,
+    const string& cache_kind = "generic",
+    const int format_version = INDICATOR_CACHE_FORMAT_VERSION)
+{
 
     ofstream file(filename);
     if (!file.is_open()) {
@@ -720,10 +737,11 @@ bool saveIndicator_estimates(string const& filename, map<Density_descr,Density_i
         return false;
     }
 
-    // file << fixed;
-    // file << setprecision(12);
-
-    file << indicators.size() << "  " << extend_criterion << endl;
+    file << "#INDICATOR_CACHE_VERSION " << format_version << "\n";
+    file << "#INDICATOR_CACHE_KIND " << cache_kind << "\n";
+    file << "#INDICATOR_CACHE_CRITERION_EXTEND " << extend_criterion << "\n";
+    file << "#INDICATOR_CACHE_ABSCHARGE_THRESHOLD " << abscharge_threshold << "\n";
+    file << indicators.size() << "\n";
     file << "# Indicator - Parameter" << endl;
     file << "# v1 v2 iRx iRy iRz x y z charge extend" << endl;
 
@@ -741,13 +759,16 @@ bool saveIndicator_estimates(string const& filename, map<Density_descr,Density_i
 }
 
 
-map<Density_descr,Density_indicator> readIndicator_estimates(string const& filename, double extend_criterion = -1) {  // TODO: check for errors in the file
+map<Density_descr,Density_indicator> readIndicator_estimates(
+    string const& filename,
+    const double expected_extend_criterion = -1,
+    const double expected_abscharge_threshold = -1,
+    const string& expected_kind = "")
+{
 
     int rank, num_worker;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_worker);
-    int N;
-    double extend_crit;
     map<Density_descr,Density_indicator> indicators{};
 
     if (rank==0) cout << "Try to read indicator parameters from file " << filename << endl;
@@ -765,42 +786,118 @@ map<Density_descr,Density_indicator> readIndicator_estimates(string const& filen
         return indicators;
     }
 
-    // read file
-    file >> N;
-    file >> extend_crit;
+    IndicatorCacheMeta meta{};
+    int N = -1;
 
-    if (abs(extend_criterion - extend_crit) > 1e-8) {
-        if (rank==0) cerr << "Extend criterion is not the same as in the file. Skip reading file\n";
+    string line;
+    if (!getline(file, line)) {
+        if (rank == 0) cerr << "Indicator cache file is empty.\n";
         file.close();
         return indicators;
     }
 
-    string line;
-    int v1,v2,Rx,Ry,Rz;
+    auto parse_meta_line = [&](const string& meta_line) {
+        vector<string> t = splitBySpacesAndTabs(meta_line);
+        if (t.size() < 2) return;
+        if (t[0] == "#INDICATOR_CACHE_VERSION") {
+            meta.format_version = stoi(t[1]);
+        } else if (t[0] == "#INDICATOR_CACHE_KIND") {
+            meta.kind = t[1];
+        } else if (t[0] == "#INDICATOR_CACHE_CRITERION_EXTEND") {
+            meta.extend_criterion = stod(t[1]);
+        } else if (t[0] == "#INDICATOR_CACHE_ABSCHARGE_THRESHOLD") {
+            meta.abscharge_threshold = stod(t[1]);
+        }
+    };
 
-    getline(file, line);
-    getline(file, line);
+    bool legacy_format = true;
+    if (line.rfind("#INDICATOR_CACHE_VERSION", 0) == 0) {
+        legacy_format = false;
+        parse_meta_line(line);
+
+        while (getline(file, line)) {
+            if (line.size() == 0) continue;
+            if (line[0] == '#') {
+                parse_meta_line(line);
+                continue;
+            }
+            N = stoi(line);
+            break;
+        }
+    } else {
+        vector<string> t = splitBySpacesAndTabs(line);
+        if (t.size() < 2) {
+            if (rank == 0) cerr << "Cannot parse legacy indicator header.\n";
+            file.close();
+            return indicators;
+        }
+        N = stoi(t[0]);
+        meta.format_version = 1;
+        meta.extend_criterion = stod(t[1]);
+        meta.kind = "legacy";
+        meta.abscharge_threshold = -1.0;
+    }
+
+    if (N < 0) {
+        if (rank == 0) cerr << "Cannot parse number of indicator rows.\n";
+        file.close();
+        return indicators;
+    }
+
+    if (!legacy_format && meta.format_version != INDICATOR_CACHE_FORMAT_VERSION) {
+        if (rank == 0) {
+            cerr << "Indicator cache format mismatch (file="
+                 << meta.format_version << ", expected="
+                 << INDICATOR_CACHE_FORMAT_VERSION << "). Recompute.\n";
+        }
+        file.close();
+        return indicators;
+    }
+
+    if (expected_extend_criterion >= 0.0 && abs(expected_extend_criterion - meta.extend_criterion) > 1e-8) {
+        if (rank == 0) cerr << "Extend criterion mismatch in indicator cache. Recompute.\n";
+        file.close();
+        return indicators;
+    }
+
+    if (expected_abscharge_threshold >= 0.0) {
+        if (legacy_format || meta.abscharge_threshold < 0.0 ||
+            abs(expected_abscharge_threshold - meta.abscharge_threshold) > 1e-8) {
+            if (rank == 0) cerr << "ABSCHARGE_THRESHOLD mismatch (or missing metadata) in indicator cache. Recompute.\n";
+            file.close();
+            return indicators;
+        }
+    }
+
+    if (!expected_kind.empty()) {
+        if (legacy_format || meta.kind != expected_kind) {
+            if (rank == 0) cerr << "Indicator cache kind mismatch (or missing metadata). Recompute.\n";
+            file.close();
+            return indicators;
+        }
+    }
 
     while (getline(file, line)) {
+        if (line.size() == 0 || line[0] == '#') continue;
 
-        file >> v1;
-        file >> v2;
-        file >> Rx;
-        file >> Ry;
-        file >> Rz;
+        vector<string> t = splitBySpacesAndTabs(line);
+        if (t.size() < 10) continue;
 
-        Density_descr ids = Density_descr(v1,v2, vector<int>{Rx,Ry,Rz});
-        Density_indicator data;
+        Density_descr ids(
+            stoi(t[0]),
+            stoi(t[1]),
+            vector<int>{stoi(t[2]), stoi(t[3]), stoi(t[4])});
 
-        file >> data.x;
-        file >> data.y;
-        file >> data.z;
-        file >> data.absCharge;
-        file >> data.extend;
+        Density_indicator data(
+            stod(t[5]), stod(t[6]), stod(t[7]), stod(t[8]), stod(t[9]));
 
         indicators.insert({ids, data});
     }
     file.close();
+
+    if (rank == 0 && int(indicators.size()) != N) {
+        cerr << "Indicator cache row count mismatch: header=" << N << " parsed=" << indicators.size() << endl;
+    }
 
     if (rank==0) cout << "data size :" << indicators.size() << endl;
 

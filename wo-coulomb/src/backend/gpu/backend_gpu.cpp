@@ -1,5 +1,6 @@
 #include "backend/backend.h"
 #include "backend/fft_executor.h"
+#include "backend/gpu/solver_gpu_factory.h"
 
 #include <cuda_runtime.h>
 #include <mpi.h>
@@ -65,14 +66,14 @@ public:
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap) override
     {
-        return std::make_unique<CoulombSolver>(vWannMap, cWannMap, true, fft_factory);
+        return make_coulomb_solver_gpu(vWannMap, cWannMap, true);
     }
 
     std::unique_ptr<Solver> createLocalFieldEffectsSolver(
         std::map<int, WannierFunction> const& vWannMap,
         std::map<int, WannierFunction> const& cWannMap) override
     {
-        return std::make_unique<LocalFieldEffectsSolver>(vWannMap, cWannMap, fft_factory);
+        return make_local_field_effects_solver_gpu(vWannMap, cWannMap);
     }
 
     std::unique_ptr<Solver> createYukawaSolver(
@@ -83,8 +84,8 @@ public:
         double relativePermittivity,
         double screeningAlpha) override
     {
-        return std::make_unique<YukawaSolver>(
-            vWannMap, cWannMap, vMeanDensity, cMeanDensity, relativePermittivity, screeningAlpha, fft_factory);
+        return make_yukawa_solver_gpu(
+            vWannMap, cWannMap, vMeanDensity, cMeanDensity, relativePermittivity, screeningAlpha);
     }
 
 private:

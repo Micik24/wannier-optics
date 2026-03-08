@@ -101,6 +101,11 @@ CRYSTAL_PERIODIC_Z = 1\n\
 # (0=disabled, 1=enabled)\n\
 ENABLE_TRANSITION_CORRECTIONS = 1\n\
 \n\
+# Enable GPU GEMM transition dipole path (requires GPU build)\n\
+# Falls back to CPU if unavailable or on runtime failure.\n\
+# (0=disabled, 1=enabled)\n\
+ENABLE_GPU_TRANSITION = 1\n\
+\n\
 # Maximum allowable relative difference between monopole-monopole approximation\n\
 # and value of 2-center integrals.\n\
 # Acts as a stopping criterion for 2-center integrals. Only integrals exceeding\n\
@@ -131,6 +136,13 @@ ENERGY_THRESHOLD = 0.001\n\
 # Recommended range: 0.01 - 0.1\n\
 # Unit: None\n\
 ABSOLUTE_CHARGE_THRESHOLD = 0.1\n\
+\n\
+# Numerical guards for shell-based early-stop of absCharge indicators.\n\
+# stop if shell_max < thr*(1-rel_guard) OR shell_max + abs_eps < thr\n\
+# gray-zone rule: if |shell_max-thr| < gray_tol, continue with next shell\n\
+ABSCHARGE_STOP_REL_GUARD = 1e-12\n\
+ABSCHARGE_STOP_ABS_EPS = 0.0\n\
+ABSCHARGE_STOP_GRAY_TOL = 0.0\n\
 \n\
 \n\
 #-------------------------------------------------------------------------------\n\

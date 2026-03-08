@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <mpi.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -13,7 +14,7 @@
 struct BenchConfig {
     int dim;
     double L;
-    double cube_size;
+    double sigma;
     std::vector<std::vector<int>> rd_list;
 };
 
@@ -59,9 +60,14 @@ static Options parse_args(int argc, char** argv)
 static BenchConfig configForSize(const std::string& size)
 {
     if (size == "medium") {
-        return BenchConfig{24, 12.0, 1.2, {{0,0,0}, {1,0,0}, {0,1,0}, {0,0,1}}};
+        return BenchConfig{
+            48,
+            16.0,
+            0.7,
+            {{0,0,0}, {1,0,0}, {0,1,0}, {0,0,1}, {1,1,0}, {1,0,1}, {0,1,1}}
+        };
     }
-    return BenchConfig{18, 10.0, 1.0, {{0,0,0}}};
+    return BenchConfig{32, 12.0, 0.6, {{0,0,0}, {1,0,0}, {0,1,0}}};
 }
 
 static void buildWannierMaps(const BenchConfig& cfg,
@@ -77,15 +83,15 @@ static void buildWannierMaps(const BenchConfig& cfg,
 
     auto meshgrid = std::make_shared<RealMeshgrid>(dim, lattice, origin);
 
-    const double A = cfg.cube_size;
+    const double sigma = cfg.sigma;
 
     // Conduction WFs
-    cWannMap.insert({0, generateCube(0, meshgrid, lattice, A, cfg.L * 0.20, cfg.L * 0.20, cfg.L * 0.20, 1.0)});
-    cWannMap.insert({1, generateCube(1, meshgrid, lattice, A, cfg.L * 0.35, cfg.L * 0.20, cfg.L * 0.20, 1.0)});
+    cWannMap.insert({0, generateGauss(0, meshgrid, lattice, sigma, cfg.L * 0.20, cfg.L * 0.20, cfg.L * 0.20, 1.0)});
+    cWannMap.insert({1, generateGauss(1, meshgrid, lattice, sigma, cfg.L * 0.35, cfg.L * 0.20, cfg.L * 0.20, 1.0)});
 
     // Valence WFs
-    vWannMap.insert({0, generateCube(0, meshgrid, lattice, A, cfg.L * 0.80, cfg.L * 0.80, cfg.L * 0.80, 1.0)});
-    vWannMap.insert({1, generateCube(1, meshgrid, lattice, A, cfg.L * 0.65, cfg.L * 0.80, cfg.L * 0.80, 1.0)});
+    vWannMap.insert({0, generateGauss(0, meshgrid, lattice, sigma, cfg.L * 0.80, cfg.L * 0.80, cfg.L * 0.80, 1.0)});
+    vWannMap.insert({1, generateGauss(1, meshgrid, lattice, sigma, cfg.L * 0.65, cfg.L * 0.80, cfg.L * 0.80, 1.0)});
 }
 
 static std::vector<Integral> buildIntegrals(const std::vector<std::vector<int>>& rd_list)
@@ -111,6 +117,10 @@ static std::vector<Integral> buildIntegrals(const std::vector<std::vector<int>>&
 
 int main(int argc, char** argv)
 {
+    MPI_Init(&argc, &argv);
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
     Options opt = parse_args(argc, argv);
     const BenchConfig cfg = configForSize(opt.size);
 
@@ -118,6 +128,11 @@ int main(int argc, char** argv)
         wo_determinism::applyDeterministicOpenMP(true);
     }
     omp_set_num_threads(opt.threads);
+
+    if (rank != 0) {
+        MPI_Finalize();
+        return 0;
+    }
 
     std::map<int, WannierFunction> vWannMap;
     std::map<int, WannierFunction> cWannMap;
@@ -131,8 +146,13 @@ int main(int argc, char** argv)
     }
 
     double checksum = 0.0;
+    bool has_nan = false;
     for (const auto& integral : integrals) {
-        checksum += integral.value;
+        if (!std::isfinite(integral.value)) {
+            has_nan = true;
+        } else {
+            checksum += integral.value;
+        }
     }
 
     std::cout.setf(std::ios::fixed);
@@ -143,5 +163,12 @@ int main(int argc, char** argv)
     std::cout << "BENCH_INTEGRALS=" << integrals.size() << "\n";
     std::cout << "CHECKSUM=" << checksum << "\n";
 
+    if (has_nan) {
+        std::cerr << "ERROR: NaN/Inf detected in benchmark results. Check input size or solver stability.\n";
+        MPI_Finalize();
+        return 2;
+    }
+
+    MPI_Finalize();
     return 0;
 }
