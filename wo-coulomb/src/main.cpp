@@ -7,6 +7,9 @@
 #include "potential.h"
 #include "backend/backend.h"
 #include "backend/transition_dipole.h"
+#if defined(WO_BACKEND_GPU)
+#include "backend/gpu/solver_gpu_factory.h"
+#endif
 #include "filehandler.h"
 #include "scheduler.h"
 #include "parallel_computation.h"
@@ -441,6 +444,7 @@ void calc_local_field_effects(
     vector<vector<vector<int>>> const& shells,
     const int NUM_OMP_THREADS,
     const double ABSOLUTE_CHARGE_THRESHOLD,
+    const double ENERGY_THRESHOLD,
     const double ABSCHARGE_STOP_REL_GUARD,
     const double ABSCHARGE_STOP_ABS_EPS,
     const double ABSCHARGE_STOP_GRAY_TOL,
@@ -488,6 +492,35 @@ void calc_local_field_effects(
     if (rank==0) {
         cout << "Check compatibility for lfe_indicators data\n";
         checkCompatibilityIndicator_lfe(lfe_indicators, vWannMap, cWannMap);
+
+#if defined(WO_BACKEND_GPU)
+        if (num_worker == 1) {
+            cout << "Try dedicated single-rank GPU dense LFE path.\n";
+            list<Integral> dense_lfe{};
+            try {
+                if (run_local_field_effects_gpu_dense_single_rank(
+                        vWannMap,
+                        cWannMap,
+                        lfe_indicators,
+                        ABSOLUTE_CHARGE_THRESHOLD,
+                        ENERGY_THRESHOLD,
+                        dense_lfe)) {
+                    cout << "Dedicated GPU dense LFE path succeeded.\n";
+                    OutputService::writeResults(
+                        outfile,
+                        dense_lfe,
+                        "intermediate result",
+                        0.0,
+                        1.0);
+                    return;
+                }
+                cout << "Dedicated GPU dense LFE path not used. Fallback to legacy scheduler path.\n";
+            } catch (const std::exception& e) {
+                cout << "[WARN] Dedicated GPU dense LFE path failed. Fallback to legacy scheduler path: "
+                     << e.what() << endl;
+            }
+        }
+#endif
 
         // create scheduler
         lfe_scheduler = make_unique<LocalFieldEffectsScheduler>(
@@ -1316,6 +1349,7 @@ int main(int argc, char *argv[]) {
 
         calc_local_field_effects(
             backend_ref, BATCH_SIZE, vWannMap, cWannMap, shells, NUM_OMP_THREADS, ABSOLUTE_CHARGE_THRESHOLD,
+            ENERGY_THRESHOLD,
             ABSCHARGE_STOP_REL_GUARD, ABSCHARGE_STOP_ABS_EPS, ABSCHARGE_STOP_GRAY_TOL, DATA_DIR);
 
         if (rank==0) {

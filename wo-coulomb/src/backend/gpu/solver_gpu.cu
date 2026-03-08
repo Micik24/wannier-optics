@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <list>
 #include <limits>
 #include <map>
 #include <set>
@@ -304,6 +305,39 @@ __global__ void gather_weighted_modes_kernel(
     const int l = q_indices[q];
     const cufftDoubleComplex val = fft_ptrs[row][l];
     out[static_cast<size_t>(q) * static_cast<size_t>(n_rows) + static_cast<size_t>(row)] = cscale(val, sqrt_w[q]);
+}
+
+__global__ void gather_weighted_modes_dual_offset_kernel(
+    cufftDoubleComplex const* const* fft_ptrs,
+    int n_rows_batch,
+    int row_offset,
+    int n_rows_total,
+    const int* q_indices,
+    const int* q_mirror_indices,
+    const double* sqrt_w,
+    int n_q,
+    cufftDoubleComplex* out_plus,
+    cufftDoubleComplex* out_minus)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t total = static_cast<size_t>(n_rows_batch) * static_cast<size_t>(n_q);
+    if (idx >= total) {
+        return;
+    }
+
+    const int row_local = static_cast<int>(idx % static_cast<size_t>(n_rows_batch));
+    const int q = static_cast<int>(idx / static_cast<size_t>(n_rows_batch));
+    const int row = row_offset + row_local;
+
+    const int l_plus = q_indices[q];
+    const int l_minus = q_mirror_indices[q];
+    const double w = sqrt_w[q];
+
+    const cufftDoubleComplex val_plus = fft_ptrs[row_local][l_plus];
+    const cufftDoubleComplex val_minus = fft_ptrs[row_local][l_minus];
+
+    out_plus[static_cast<size_t>(q) * static_cast<size_t>(n_rows_total) + static_cast<size_t>(row)] = cscale(val_plus, w);
+    out_minus[static_cast<size_t>(q) * static_cast<size_t>(n_rows_total) + static_cast<size_t>(row)] = cscale(val_minus, w);
 }
 
 __global__ void extract_gram_real_kernel(
@@ -1186,6 +1220,621 @@ private:
     const size_t max_cache_entries_ = 4096;
 };
 
+double bytes_to_gib(size_t bytes)
+{
+    return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+}
+
+std::vector<Density_descr> build_lfe_survivor_tuples(
+    std::map<Density_descr, Density_indicator> const& lfe_indicators,
+    double abscharge_threshold)
+{
+    std::vector<Density_descr> survivors{};
+    survivors.reserve(lfe_indicators.size());
+    for (const auto& kv : lfe_indicators) {
+        if (kv.second.absCharge < abscharge_threshold) {
+            continue;
+        }
+        Density_descr converted(kv.first);
+        converted.R[0] = -converted.R[0];
+        converted.R[1] = -converted.R[1];
+        converted.R[2] = -converted.R[2];
+        survivors.push_back(converted);
+    }
+    return survivors;
+}
+
+size_t estimate_cufft_workspace_bytes(const std::vector<int>& dims, int batch)
+{
+    if (dims.size() != 3) {
+        throw std::runtime_error("estimate_cufft_workspace_bytes expects 3D dims.");
+    }
+    if (batch <= 0) {
+        return 0;
+    }
+
+    cufftHandle plan = 0;
+    checkCufft(cufftCreate(&plan), "cufftCreate(workspace estimate)");
+
+    int n[3]{dims[2], dims[1], dims[0]};
+    const int idist = dims[0] * dims[1] * dims[2];
+    size_t work_size = 0;
+    checkCufft(
+        cufftMakePlanMany(
+            plan,
+            3,
+            n,
+            n,
+            1,
+            idist,
+            n,
+            1,
+            idist,
+            CUFFT_Z2Z,
+            batch,
+            &work_size),
+        "cufftMakePlanMany(workspace estimate)");
+
+    cufftDestroy(plan);
+    return work_size;
+}
+
+struct LfeDensePlan
+{
+    bool valid = false;
+    bool use_full_gemm = false;
+    size_t density_batch = 1;
+    size_t tile_size = 0;
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    size_t safety_bytes = 0;
+    size_t budget_bytes = 0;
+    size_t spectral_bytes = 0;
+    size_t qmeta_bytes = 0;
+    size_t cufft_workspace_bytes = 0;
+    size_t build_peak_bytes = 0;
+    size_t contraction_full_bytes = 0;
+    size_t contraction_tile_bytes = 0;
+};
+
+LfeDensePlan plan_lfe_dense(
+    size_t n_tuple,
+    size_t n_q,
+    size_t n_grid,
+    const std::vector<int>& dims)
+{
+    LfeDensePlan plan{};
+    plan.valid = false;
+
+    if (n_tuple == 0 || n_q == 0 || n_grid == 0) {
+        plan.valid = true;
+        plan.use_full_gemm = true;
+        plan.density_batch = 1;
+        plan.tile_size = 0;
+        return plan;
+    }
+
+    checkCuda(cudaMemGetInfo(&plan.free_bytes, &plan.total_bytes), "cudaMemGetInfo(LFE dense plan)");
+
+    const size_t safety_floor = 512ull * 1024ull * 1024ull;
+    const size_t safety_cap = 4ull * 1024ull * 1024ull * 1024ull;
+    const size_t safety_fraction = static_cast<size_t>(0.20 * static_cast<double>(plan.free_bytes));
+    plan.safety_bytes = std::min(safety_cap, std::max(safety_floor, safety_fraction));
+    if (plan.free_bytes <= plan.safety_bytes) {
+        return plan;
+    }
+    plan.budget_bytes = plan.free_bytes - plan.safety_bytes;
+
+    const size_t cbytes = sizeof(cufftDoubleComplex);
+    plan.spectral_bytes = 2ull * n_tuple * n_q * cbytes; // A(q) and B(-q)
+    plan.qmeta_bytes = n_q * (2ull * sizeof(int) + sizeof(double));
+    plan.contraction_full_bytes = n_tuple * n_tuple * cbytes;
+
+    const size_t persistent_bytes = plan.spectral_bytes + plan.qmeta_bytes;
+    if (persistent_bytes >= plan.budget_bytes) {
+        return plan;
+    }
+
+    const size_t per_density_bytes = n_grid * (sizeof(double) + sizeof(cufftDoubleComplex));
+    const size_t build_budget = plan.budget_bytes - persistent_bytes;
+    size_t candidate_batch = std::min(n_tuple, recommend_density_build_batch(n_grid));
+    candidate_batch = std::max<size_t>(1, std::min<size_t>(candidate_batch, 256));
+
+    size_t selected_batch = 0;
+    size_t selected_ws = 0;
+    while (candidate_batch >= 1) {
+        const size_t ws = estimate_cufft_workspace_bytes(dims, static_cast<int>(candidate_batch));
+        const size_t batch_bytes = candidate_batch * per_density_bytes + ws;
+        if (batch_bytes <= build_budget) {
+            selected_batch = candidate_batch;
+            selected_ws = ws;
+            break;
+        }
+        candidate_batch /= 2;
+    }
+
+    if (selected_batch == 0) {
+        return plan;
+    }
+
+    plan.density_batch = selected_batch;
+    plan.cufft_workspace_bytes = selected_ws;
+    plan.build_peak_bytes = persistent_bytes + plan.density_batch * per_density_bytes + plan.cufft_workspace_bytes;
+    if (plan.build_peak_bytes > plan.budget_bytes) {
+        return plan;
+    }
+
+    const size_t full_peak = persistent_bytes + plan.contraction_full_bytes;
+    if (full_peak <= plan.budget_bytes) {
+        plan.use_full_gemm = true;
+        plan.tile_size = std::min<size_t>(n_tuple, 512);
+        plan.contraction_tile_bytes = plan.contraction_full_bytes;
+        plan.valid = true;
+        return plan;
+    }
+
+    const size_t available_for_tile = plan.budget_bytes - persistent_bytes;
+    size_t tile = static_cast<size_t>(std::floor(std::sqrt(static_cast<double>(available_for_tile) / static_cast<double>(cbytes))));
+    tile = std::min(tile, n_tuple);
+    if (tile == 0) {
+        return plan;
+    }
+
+    plan.use_full_gemm = false;
+    plan.tile_size = tile;
+    plan.contraction_tile_bytes = tile * tile * cbytes;
+    plan.valid = true;
+    return plan;
+}
+
+class LocalFieldEffectsGpuDenseRunner
+{
+public:
+    LocalFieldEffectsGpuDenseRunner(
+        std::map<int, WannierFunction> const& vWannMap,
+        std::map<int, WannierFunction> const& cWannMap)
+        : vWannMap_(vWannMap),
+          cWannMap_(cWannMap),
+          rec_mesh_(vWannMap.begin()->second.getMeshgrid()),
+          fft_plans_(rec_mesh_.getDim())
+    {
+        const std::vector<double> supercell_d = vWannMap.begin()->second.getLatticeInUnitcellBasis();
+        for (int i = 0; i < 3; ++i) {
+            const int rounded = static_cast<int>(std::llround(supercell_d[i]));
+            if (std::abs(supercell_d[i] - static_cast<double>(rounded)) > 1e-5) {
+                throw std::runtime_error("Supercell is not compatible with unitcell for dense LFE GPU solver.");
+            }
+            supercell_[i] = rounded;
+        }
+
+        const RealMeshgrid* real_mesh = vWannMap.begin()->second.getMeshgrid();
+        dV_ = real_mesh->getdV();
+        V_unitcell_ = vWannMap.begin()->second.getVunitcell();
+        N_ = real_mesh->getNumDataPoints();
+        dims_ = rec_mesh_.getDim();
+
+        checkCuda(cudaStreamCreate(&stream_), "cudaStreamCreate(LFE dense)");
+        checkCublas(cublasCreate(&cublas_), "cublasCreate(LFE dense)");
+        checkCublas(cublasSetStream(cublas_, stream_), "cublasSetStream(LFE dense)");
+
+        std::vector<int> q_indices{};
+        std::vector<int> q_mirror_indices{};
+        std::vector<double> sqrt_w{};
+
+        for (int i = 0; i < dims_[0]; i += supercell_[0]) {
+            for (int j = 0; j < dims_[1]; j += supercell_[1]) {
+                for (int k = 0; k < dims_[2]; k += supercell_[2]) {
+                    if (i == 0 && j == 0 && k == 0) {
+                        continue;
+                    }
+
+                    double qx = 0.0;
+                    double qy = 0.0;
+                    double qz = 0.0;
+                    rec_mesh_.xyz(i, j, k, qx, qy, qz);
+
+                    const double w = potential_.fourierCart(qx, qy, qz) * dV_ * dV_ /
+                        std::pow(2.0 * M_PI, 3.0) /
+                        V_unitcell_;
+
+                    const int l = rec_mesh_.getGlobId(i, j, k);
+                    const int mi = (dims_[0] - i) % dims_[0];
+                    const int mj = (dims_[1] - j) % dims_[1];
+                    const int mk = (dims_[2] - k) % dims_[2];
+                    const int l_mirror = rec_mesh_.getGlobId(mi, mj, mk);
+
+                    q_indices.push_back(l);
+                    q_mirror_indices.push_back(l_mirror);
+                    sqrt_w.push_back(std::sqrt(std::max(0.0, w)));
+                }
+            }
+        }
+
+        Q_ = static_cast<int>(q_indices.size());
+        d_q_indices_.allocate(q_indices.size(), "cudaMalloc(LFE dense q indices)");
+        d_q_mirror_indices_.allocate(q_mirror_indices.size(), "cudaMalloc(LFE dense q mirror indices)");
+        d_sqrt_w_.allocate(sqrt_w.size(), "cudaMalloc(LFE dense sqrt weights)");
+        if (!q_indices.empty()) {
+            checkCuda(
+                cudaMemcpyAsync(
+                    d_q_indices_.get(),
+                    q_indices.data(),
+                    sizeof(int) * q_indices.size(),
+                    cudaMemcpyHostToDevice,
+                    stream_),
+                "copy LFE dense q indices");
+            checkCuda(
+                cudaMemcpyAsync(
+                    d_q_mirror_indices_.get(),
+                    q_mirror_indices.data(),
+                    sizeof(int) * q_mirror_indices.size(),
+                    cudaMemcpyHostToDevice,
+                    stream_),
+                "copy LFE dense q mirror indices");
+            checkCuda(
+                cudaMemcpyAsync(
+                    d_sqrt_w_.get(),
+                    sqrt_w.data(),
+                    sizeof(double) * sqrt_w.size(),
+                    cudaMemcpyHostToDevice,
+                    stream_),
+                "copy LFE dense sqrt weights");
+            checkCuda(cudaStreamSynchronize(stream_), "sync LFE dense q precompute");
+        }
+    }
+
+    ~LocalFieldEffectsGpuDenseRunner()
+    {
+        release_pre_fft_density_gpu_workspace();
+        if (cublas_ != nullptr) {
+            cublasDestroy(cublas_);
+            cublas_ = nullptr;
+        }
+        if (stream_ != nullptr) {
+            cudaStreamDestroy(stream_);
+            stream_ = nullptr;
+        }
+    }
+
+    bool run(
+        const std::vector<Density_descr>& survivors_s,
+        double energy_threshold,
+        std::list<Integral>& out_integrals)
+    {
+        out_integrals.clear();
+        const size_t Nt = survivors_s.size();
+        if (Nt == 0) {
+            std::cout << "[LFE GPU dense] No surviving tuples after ABSCHARGE screening.\n";
+            return true;
+        }
+        if (Q_ == 0) {
+            std::cout << "[LFE GPU dense] Q=0 after excluding G=0. Output is empty.\n";
+            return true;
+        }
+
+        const LfeDensePlan plan = plan_lfe_dense(
+            Nt,
+            static_cast<size_t>(Q_),
+            static_cast<size_t>(N_),
+            dims_);
+
+        std::cout
+            << "[LFE GPU dense] Planner: Nt=" << Nt
+            << ", Q=" << Q_
+            << ", N=" << N_
+            << ", free=" << bytes_to_gib(plan.free_bytes) << " GiB"
+            << ", safety=" << bytes_to_gib(plan.safety_bytes) << " GiB"
+            << ", budget=" << bytes_to_gib(plan.budget_bytes) << " GiB"
+            << ", spectral=" << bytes_to_gib(plan.spectral_bytes) << " GiB"
+            << ", qmeta=" << bytes_to_gib(plan.qmeta_bytes) << " GiB"
+            << ", cufft_ws=" << bytes_to_gib(plan.cufft_workspace_bytes) << " GiB"
+            << ", density_batch=" << plan.density_batch
+            << "\n";
+
+        if (!plan.valid) {
+            std::cout << "[LFE GPU dense] Planner could not find a safe memory plan. Fallback required.\n";
+            return false;
+        }
+
+        if (plan.use_full_gemm) {
+            std::cout << "[LFE GPU dense] Contraction mode: FULL GEMM\n";
+        } else {
+            std::cout << "[LFE GPU dense] Contraction mode: TILED GEMM (tile=" << plan.tile_size << ")\n";
+        }
+
+        DeviceBuffer<cufftDoubleComplex> d_modes_plus{};
+        DeviceBuffer<cufftDoubleComplex> d_modes_minus{};
+        d_modes_plus.allocate(Nt * static_cast<size_t>(Q_), "cudaMalloc(LFE dense modes plus)");
+        d_modes_minus.allocate(Nt * static_cast<size_t>(Q_), "cudaMalloc(LFE dense modes minus)");
+        build_global_modes(survivors_s, plan.density_batch, d_modes_plus, d_modes_minus);
+
+        if (plan.use_full_gemm) {
+            contract_full_and_emit(survivors_s, energy_threshold, plan.tile_size, d_modes_plus, d_modes_minus, out_integrals);
+        } else {
+            contract_tiled_and_emit(survivors_s, energy_threshold, plan.tile_size, d_modes_plus, d_modes_minus, out_integrals);
+        }
+
+        return true;
+    }
+
+private:
+    void build_global_modes(
+        const std::vector<Density_descr>& survivors_s,
+        size_t density_batch,
+        DeviceBuffer<cufftDoubleComplex>& d_modes_plus,
+        DeviceBuffer<cufftDoubleComplex>& d_modes_minus)
+    {
+        const int threads = 256;
+        const int n_tuple = static_cast<int>(survivors_s.size());
+
+        DeviceBuffer<cufftDoubleComplex*> d_fft_ptrs{};
+        DeviceBuffer<cufftDoubleComplex> d_fft{};
+
+        for (size_t start = 0; start < survivors_s.size(); start += density_batch) {
+            const size_t end = std::min(start + density_batch, survivors_s.size());
+            const size_t B = end - start;
+
+            std::vector<PreFftDensitySpec> specs{};
+            specs.reserve(B);
+            for (size_t i = start; i < end; ++i) {
+                PreFftDensitySpec s{};
+                s.idx1 = survivors_s[i].id1;
+                s.idx2 = survivors_s[i].id2;
+                s.R = std::array<int, 3>{
+                    -survivors_s[i].R[0],
+                    -survivors_s[i].R[1],
+                    -survivors_s[i].R[2]};
+                s.user_tag = static_cast<int>(i - start);
+                specs.push_back(s);
+            }
+
+            PreFftAuxConfig cfg{};
+            cfg.apply_auxiliary_subtraction = false;
+            cfg.copy_metadata_to_host = false;
+            cfg.enable_timing = false;
+
+            GpuDensityBatch batch = build_pre_fft_density_batch_gpu(
+                PreFftDensityKind::TransitionCv,
+                cWannMap_,
+                vWannMap_,
+                specs,
+                cfg);
+
+            forward_fft_real_batch(batch, fft_plans_, stream_, d_fft);
+
+            std::vector<cufftDoubleComplex*> h_fft_ptrs(B, nullptr);
+            for (size_t i = 0; i < B; ++i) {
+                h_fft_ptrs[i] = d_fft.get() + i * static_cast<size_t>(N_);
+            }
+            d_fft_ptrs.allocate(B, "cudaMalloc(LFE dense fft ptrs)");
+            checkCuda(
+                cudaMemcpyAsync(
+                    d_fft_ptrs.get(),
+                    h_fft_ptrs.data(),
+                    sizeof(cufftDoubleComplex*) * B,
+                    cudaMemcpyHostToDevice,
+                    stream_),
+                "copy LFE dense fft ptrs");
+
+            const size_t total = B * static_cast<size_t>(Q_);
+            const int blocks = static_cast<int>((total + threads - 1) / threads);
+            gather_weighted_modes_dual_offset_kernel<<<blocks, threads, 0, stream_>>>(
+                d_fft_ptrs.get(),
+                static_cast<int>(B),
+                static_cast<int>(start),
+                n_tuple,
+                d_q_indices_.get(),
+                d_q_mirror_indices_.get(),
+                d_sqrt_w_.get(),
+                Q_,
+                d_modes_plus.get(),
+                d_modes_minus.get());
+            checkCuda(cudaGetLastError(), "gather_weighted_modes_dual_offset_kernel");
+            checkCuda(cudaStreamSynchronize(stream_), "sync LFE dense gather modes");
+        }
+    }
+
+    void append_entries_from_host_tile(
+        const std::vector<Density_descr>& survivors_s,
+        size_t row0,
+        size_t col0,
+        size_t rows,
+        size_t cols,
+        const std::vector<cufftDoubleComplex>& tile,
+        double energy_threshold,
+        std::list<Integral>& out_integrals) const
+    {
+        for (size_t cj = 0; cj < cols; ++cj) {
+            const size_t j = col0 + cj;
+            for (size_t ri = 0; ri < rows; ++ri) {
+                const size_t i = row0 + ri;
+                if (i < j) {
+                    continue;
+                }
+
+                const cufftDoubleComplex v = tile[cj * rows + ri];
+                if (std::abs(v.y) > 1e-8) {
+                    std::ostringstream msg;
+                    msg << "Dense LFE GPU value has non-zero imaginary part at (" << i << "," << j << "): " << v.y;
+                    throw std::runtime_error(msg.str());
+                }
+
+                if (std::abs(v.x) < energy_threshold) {
+                    continue;
+                }
+
+                Integral a(
+                    survivors_s[i].id1,
+                    survivors_s[j].id1,
+                    survivors_s[i].id2,
+                    survivors_s[j].id2,
+                    std::vector<int>{0, 0, 0},
+                    survivors_s[i].R,
+                    survivors_s[j].R);
+                a.value = v.x;
+                out_integrals.push_back(a);
+
+                if (i != j) {
+                    Integral b(
+                        survivors_s[j].id1,
+                        survivors_s[i].id1,
+                        survivors_s[j].id2,
+                        survivors_s[i].id2,
+                        std::vector<int>{0, 0, 0},
+                        survivors_s[j].R,
+                        survivors_s[i].R);
+                    b.value = v.x;
+                    out_integrals.push_back(b);
+                }
+            }
+        }
+    }
+
+    void contract_full_and_emit(
+        const std::vector<Density_descr>& survivors_s,
+        double energy_threshold,
+        size_t emit_tile_hint,
+        DeviceBuffer<cufftDoubleComplex>& d_modes_plus,
+        DeviceBuffer<cufftDoubleComplex>& d_modes_minus,
+        std::list<Integral>& out_integrals)
+    {
+        const int n_tuple = static_cast<int>(survivors_s.size());
+        DeviceBuffer<cufftDoubleComplex> d_gram{};
+        d_gram.allocate(static_cast<size_t>(n_tuple) * static_cast<size_t>(n_tuple), "cudaMalloc(LFE dense full gram)");
+
+        const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+        const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+        checkCublas(
+            cublasZgemm(
+                cublas_,
+                CUBLAS_OP_N,
+                CUBLAS_OP_T,
+                n_tuple,
+                n_tuple,
+                Q_,
+                &alpha,
+                reinterpret_cast<const cuDoubleComplex*>(d_modes_plus.get()),
+                n_tuple,
+                reinterpret_cast<const cuDoubleComplex*>(d_modes_minus.get()),
+                n_tuple,
+                &beta,
+                reinterpret_cast<cuDoubleComplex*>(d_gram.get()),
+                n_tuple),
+            "cublasZgemm(LFE dense full)");
+        checkCuda(cudaStreamSynchronize(stream_), "sync LFE dense full contraction");
+
+        const size_t emit_tile = std::max<size_t>(1, std::min<size_t>(emit_tile_hint, survivors_s.size()));
+        for (size_t row0 = 0; row0 < survivors_s.size(); row0 += emit_tile) {
+            const size_t rows = std::min(emit_tile, survivors_s.size() - row0);
+            for (size_t col0 = 0; col0 <= row0; col0 += emit_tile) {
+                const size_t cols = std::min(emit_tile, survivors_s.size() - col0);
+                std::vector<cufftDoubleComplex> host_tile(rows * cols);
+                checkCublas(
+                    cublasGetMatrix(
+                        static_cast<int>(rows),
+                        static_cast<int>(cols),
+                        sizeof(cufftDoubleComplex),
+                        d_gram.get() + col0 * survivors_s.size() + row0,
+                        n_tuple,
+                        host_tile.data(),
+                        static_cast<int>(rows)),
+                    "cublasGetMatrix(LFE dense full tile)");
+                append_entries_from_host_tile(
+                    survivors_s,
+                    row0,
+                    col0,
+                    rows,
+                    cols,
+                    host_tile,
+                    energy_threshold,
+                    out_integrals);
+            }
+        }
+    }
+
+    void contract_tiled_and_emit(
+        const std::vector<Density_descr>& survivors_s,
+        double energy_threshold,
+        size_t tile_size,
+        DeviceBuffer<cufftDoubleComplex>& d_modes_plus,
+        DeviceBuffer<cufftDoubleComplex>& d_modes_minus,
+        std::list<Integral>& out_integrals)
+    {
+        const int n_tuple = static_cast<int>(survivors_s.size());
+        const size_t tile = std::max<size_t>(1, std::min(tile_size, survivors_s.size()));
+        DeviceBuffer<cufftDoubleComplex> d_tile{};
+        d_tile.allocate(tile * tile, "cudaMalloc(LFE dense tile)");
+
+        const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+        const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+
+        for (size_t row0 = 0; row0 < survivors_s.size(); row0 += tile) {
+            const int rows = static_cast<int>(std::min(tile, survivors_s.size() - row0));
+            for (size_t col0 = 0; col0 <= row0; col0 += tile) {
+                const int cols = static_cast<int>(std::min(tile, survivors_s.size() - col0));
+
+                checkCublas(
+                    cublasZgemm(
+                        cublas_,
+                        CUBLAS_OP_N,
+                        CUBLAS_OP_T,
+                        rows,
+                        cols,
+                        Q_,
+                        &alpha,
+                        reinterpret_cast<const cuDoubleComplex*>(d_modes_plus.get() + row0),
+                        n_tuple,
+                        reinterpret_cast<const cuDoubleComplex*>(d_modes_minus.get() + col0),
+                        n_tuple,
+                        &beta,
+                        reinterpret_cast<cuDoubleComplex*>(d_tile.get()),
+                        rows),
+                    "cublasZgemm(LFE dense tiled)");
+                checkCuda(cudaStreamSynchronize(stream_), "sync LFE dense tiled contraction");
+
+                std::vector<cufftDoubleComplex> host_tile(static_cast<size_t>(rows) * static_cast<size_t>(cols));
+                checkCuda(
+                    cudaMemcpy(
+                        host_tile.data(),
+                        d_tile.get(),
+                        sizeof(cufftDoubleComplex) * host_tile.size(),
+                        cudaMemcpyDeviceToHost),
+                    "copy LFE dense tile");
+
+                append_entries_from_host_tile(
+                    survivors_s,
+                    row0,
+                    col0,
+                    static_cast<size_t>(rows),
+                    static_cast<size_t>(cols),
+                    host_tile,
+                    energy_threshold,
+                    out_integrals);
+            }
+        }
+    }
+
+    std::map<int, WannierFunction> const& vWannMap_;
+    std::map<int, WannierFunction> const& cWannMap_;
+    ReciprocalMeshgrid rec_mesh_;
+    CoulombPotential potential_{};
+    std::vector<int> dims_{};
+    int supercell_[3]{1, 1, 1};
+    double dV_ = 0.0;
+    double V_unitcell_ = 1.0;
+    int N_ = 0;
+    int Q_ = 0;
+
+    cudaStream_t stream_ = nullptr;
+    cublasHandle_t cublas_ = nullptr;
+
+    CufftPlanCache3D fft_plans_;
+
+    DeviceBuffer<int> d_q_indices_{};
+    DeviceBuffer<int> d_q_mirror_indices_{};
+    DeviceBuffer<double> d_sqrt_w_{};
+};
+
 struct DensityPairLess
 {
     bool operator()(const std::pair<Density_descr, Density_descr>& a, const std::pair<Density_descr, Density_descr>& b) const
@@ -1970,6 +2619,40 @@ private:
 };
 
 }  // namespace
+
+bool run_local_field_effects_gpu_dense_single_rank(
+    std::map<int, WannierFunction> const& vWannMap,
+    std::map<int, WannierFunction> const& cWannMap,
+    std::map<Density_descr, Density_indicator> const& lfe_indicators,
+    double abscharge_threshold,
+    double energy_threshold,
+    std::list<Integral>& out_integrals)
+{
+    out_integrals.clear();
+
+    int rank = 0;
+    int num_worker = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &num_worker);
+    if (num_worker != 1 || rank != 0) {
+        return false;
+    }
+
+    try {
+        std::vector<Density_descr> survivors = build_lfe_survivor_tuples(
+            lfe_indicators,
+            abscharge_threshold);
+
+        std::cout << "[LFE GPU dense] Surviving tuples: " << survivors.size() << std::endl;
+
+        LocalFieldEffectsGpuDenseRunner runner(vWannMap, cWannMap);
+        return runner.run(survivors, energy_threshold, out_integrals);
+    } catch (const std::exception& e) {
+        std::cout << "[WARN] run_local_field_effects_gpu_dense_single_rank failed: " << e.what() << std::endl;
+        out_integrals.clear();
+        return false;
+    }
+}
 
 std::unique_ptr<Solver> make_coulomb_solver_gpu(
     std::map<int, WannierFunction> const& vWannMap,
