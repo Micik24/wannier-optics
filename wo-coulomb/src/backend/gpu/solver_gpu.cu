@@ -129,24 +129,12 @@ struct SameBandFftCacheEntry
     double alpha = 0.0;
 };
 
-void freeSameBandCache(std::map<Density_descr, SameBandFftCacheEntry>& cache)
-{
-    for (auto& kv : cache) {
-        if (kv.second.fft_aux != nullptr) {
-            cudaFree(kv.second.fft_aux);
-            kv.second.fft_aux = nullptr;
-        }
-        if (kv.second.fft_raw != nullptr) {
-            cudaFree(kv.second.fft_raw);
-            kv.second.fft_raw = nullptr;
-        }
-    }
-    cache.clear();
-}
-
 struct SolverStageTimingsMs
 {
     double density_build = 0.0;
+    double density_materialization = 0.0;
+    double auxiliary_build = 0.0;
+    double auxiliary_subtraction = 0.0;
     double fft = 0.0;
     double contraction = 0.0;
     double host_device_copy = 0.0;
@@ -159,7 +147,229 @@ struct SameBandCacheBuildConfig
     bool keep_dual_spectral = true;
     bool wrap_aux = true;
     bool enable_timing = false;
-    size_t max_cache_entries = 4096;
+};
+
+size_t parse_bytes_with_suffix(const std::string& text)
+{
+    std::string s(text);
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c) != 0; }), s.end());
+    if (s.empty()) {
+        throw std::runtime_error("Empty cache size string.");
+    }
+
+    auto lower = s;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
+    double scale = 1.0;
+    auto strip_suffix = [&](const char* suffix, double factor) -> bool {
+        const std::string sf(suffix);
+        if (lower.size() >= sf.size() && lower.compare(lower.size() - sf.size(), sf.size(), sf) == 0) {
+            lower.erase(lower.size() - sf.size());
+            scale = factor;
+            return true;
+        }
+        return false;
+    };
+
+    if (!strip_suffix("gib", 1024.0 * 1024.0 * 1024.0) &&
+        !strip_suffix("mib", 1024.0 * 1024.0) &&
+        !strip_suffix("kib", 1024.0) &&
+        !strip_suffix("gb", 1000.0 * 1000.0 * 1000.0) &&
+        !strip_suffix("mb", 1000.0 * 1000.0) &&
+        !strip_suffix("kb", 1000.0) &&
+        !strip_suffix("g", 1024.0 * 1024.0 * 1024.0) &&
+        !strip_suffix("m", 1024.0 * 1024.0) &&
+        !strip_suffix("k", 1024.0)) {
+        scale = 1.0;
+    }
+
+    if (lower.empty()) {
+        throw std::runtime_error("Invalid cache size string.");
+    }
+    const double value = std::stod(lower);
+    if (!(value > 0.0)) {
+        throw std::runtime_error("Cache size must be positive.");
+    }
+    return static_cast<size_t>(value * scale);
+}
+
+size_t same_band_cache_default_bytes()
+{
+    // Per-band cache default. Coulomb/Yukawa each maintain conduction + valence stores.
+    return static_cast<size_t>(3) * 1024ull * 1024ull * 1024ull;
+}
+
+size_t same_band_cache_limit_bytes_from_env()
+{
+    const char* env = std::getenv("WO_GPU_DENSITY_CACHE_BYTES");
+    if (env == nullptr || *env == '\0') {
+        return same_band_cache_default_bytes();
+    }
+    try {
+        return parse_bytes_with_suffix(env);
+    } catch (const std::exception&) {
+        return same_band_cache_default_bytes();
+    }
+}
+
+void release_same_band_entry(SameBandFftCacheEntry& entry)
+{
+    if (entry.fft_aux != nullptr) {
+        cudaFree(entry.fft_aux);
+        entry.fft_aux = nullptr;
+    }
+    if (entry.fft_raw != nullptr) {
+        cudaFree(entry.fft_raw);
+        entry.fft_raw = nullptr;
+    }
+}
+
+size_t same_band_entry_device_bytes(const SameBandFftCacheEntry& entry, int N)
+{
+    const size_t n = static_cast<size_t>(std::max(0, N));
+    size_t bytes = 0;
+    if (entry.fft_aux != nullptr) {
+        bytes += sizeof(cufftDoubleComplex) * n;
+    }
+    if (entry.fft_raw != nullptr) {
+        bytes += sizeof(cufftDoubleComplex) * n;
+    }
+    return bytes;
+}
+
+struct SameBandPersistentCacheNode
+{
+    SameBandFftCacheEntry entry{};
+    size_t bytes = 0;
+    size_t last_used_iteration = 0;
+};
+
+class SameBandPersistentCache
+{
+public:
+    explicit SameBandPersistentCache(size_t capacity_bytes)
+        : capacity_bytes_(std::max<size_t>(1, capacity_bytes))
+    {
+    }
+
+    ~SameBandPersistentCache()
+    {
+        clear();
+    }
+
+    SameBandPersistentCache(const SameBandPersistentCache&) = delete;
+    SameBandPersistentCache& operator=(const SameBandPersistentCache&) = delete;
+
+    bool contains(const Density_descr& key) const
+    {
+        return nodes_.find(key) != nodes_.end();
+    }
+
+    void touch(const Density_descr& key)
+    {
+        auto it = nodes_.find(key);
+        if (it == nodes_.end()) {
+            return;
+        }
+        touch(it);
+    }
+
+    const SameBandFftCacheEntry& at(const Density_descr& key)
+    {
+        auto it = nodes_.find(key);
+        if (it == nodes_.end()) {
+            throw std::runtime_error("Density FFT cache miss.");
+        }
+        touch(it);
+        return it->second.entry;
+    }
+
+    void insert(
+        const Density_descr& key,
+        SameBandFftCacheEntry&& entry,
+        size_t entry_bytes,
+        const std::set<Density_descr>& protected_keys)
+    {
+        if (entry_bytes > capacity_bytes_) {
+            release_same_band_entry(entry);
+            throw std::runtime_error("Density FFT cache entry exceeds configured memory cap.");
+        }
+
+        auto existing = nodes_.find(key);
+        if (existing != nodes_.end()) {
+            total_bytes_ -= existing->second.bytes;
+            release_same_band_entry(existing->second.entry);
+            lru_.remove(existing->first);
+            nodes_.erase(existing);
+        }
+
+        evict_until_fit(entry_bytes, protected_keys);
+
+        SameBandPersistentCacheNode node{};
+        node.entry = std::move(entry);
+        node.bytes = entry_bytes;
+        node.last_used_iteration = ++iteration_counter_;
+
+        total_bytes_ += node.bytes;
+        nodes_.insert({key, std::move(node)});
+        lru_.push_front(key);
+    }
+
+    void clear()
+    {
+        for (auto& kv : nodes_) {
+            release_same_band_entry(kv.second.entry);
+        }
+        nodes_.clear();
+        lru_.clear();
+        total_bytes_ = 0;
+        iteration_counter_ = 0;
+    }
+
+private:
+    void touch(std::map<Density_descr, SameBandPersistentCacheNode>::iterator it)
+    {
+        it->second.last_used_iteration = ++iteration_counter_;
+        lru_.remove(it->first);
+        lru_.push_front(it->first);
+    }
+
+    void evict_until_fit(size_t bytes_needed, const std::set<Density_descr>& protected_keys)
+    {
+        while (total_bytes_ + bytes_needed > capacity_bytes_) {
+            bool evicted = false;
+            for (auto rit = lru_.rbegin(); rit != lru_.rend(); ++rit) {
+                if (protected_keys.find(*rit) != protected_keys.end()) {
+                    continue;
+                }
+
+                auto map_it = nodes_.find(*rit);
+                if (map_it == nodes_.end()) {
+                    continue;
+                }
+
+                total_bytes_ -= map_it->second.bytes;
+                release_same_band_entry(map_it->second.entry);
+                lru_.remove(map_it->first);
+                nodes_.erase(map_it);
+                evicted = true;
+                break;
+            }
+
+            if (!evicted) {
+                throw std::runtime_error(
+                    "Density FFT cache memory cap is too small for the active descriptor working set.");
+            }
+        }
+    }
+
+    size_t capacity_bytes_ = 1;
+    size_t total_bytes_ = 0;
+    size_t iteration_counter_ = 0;
+    std::map<Density_descr, SameBandPersistentCacheNode> nodes_{};
+    std::list<Density_descr> lru_{};
 };
 
 size_t recommend_density_build_batch(size_t K)
@@ -660,7 +870,7 @@ double analytic_i4(
 
 void ensure_same_band_cache_entries(
     const std::vector<Density_descr>& required,
-    std::map<Density_descr, SameBandFftCacheEntry>& cache,
+    SameBandPersistentCache& cache,
     const std::map<int, WannierFunction>& wann_map,
     CufftPlanCache3D& fft_plans,
     cudaStream_t stream,
@@ -672,21 +882,19 @@ void ensure_same_band_cache_entries(
         return;
     }
 
+    std::set<Density_descr> required_set(required.begin(), required.end());
     std::vector<Density_descr> missing{};
     missing.reserve(required.size());
     for (const auto& d : required) {
-        if (cache.find(d) == cache.end()) {
+        if (cache.contains(d)) {
+            cache.touch(d);
+        } else {
             missing.push_back(d);
         }
     }
 
     if (missing.empty()) {
         return;
-    }
-
-    if (cache.size() + missing.size() > cfg.max_cache_entries) {
-        freeSameBandCache(cache);
-        missing = required;
     }
 
     const size_t max_batch = recommend_density_build_batch(static_cast<size_t>(N));
@@ -734,6 +942,9 @@ void ensure_same_band_cache_entries(
         if (timings != nullptr) {
             if (cfg.enable_timing) {
                 timings->density_build += batch.timings_ms.total;
+                timings->density_materialization += batch.timings_ms.density_materialization;
+                timings->auxiliary_build += batch.timings_ms.auxiliary_build;
+                timings->auxiliary_subtraction += batch.timings_ms.auxiliary_subtraction;
                 timings->host_device_copy += batch.timings_ms.metadata_copy_gpu_to_cpu;
             } else {
                 timings->density_build += elapsed_ms(t_density_start, t_density_stop);
@@ -831,8 +1042,8 @@ void ensure_same_band_cache_entries(
                         stream),
                     "copy cache fft_raw");
             }
-
-            cache.insert({missing[start + local], entry});
+            const size_t entry_bytes = same_band_entry_device_bytes(entry, N);
+            cache.insert(missing[start + local], std::move(entry), entry_bytes, required_set);
         }
         checkCuda(cudaStreamSynchronize(stream), "sync same-band cache build");
     }
@@ -1862,7 +2073,9 @@ public:
           wrap_aux_(wrap_aux),
           real_mesh_(vWannMap.begin()->second.getMeshgrid()),
           rec_mesh_(vWannMap.begin()->second.getMeshgrid()),
-          fft_plans_(rec_mesh_.getDim())
+          fft_plans_(rec_mesh_.getDim()),
+          c_cache_(same_band_cache_limit_bytes_from_env()),
+          v_cache_(same_band_cache_limit_bytes_from_env())
     {
         dV_ = real_mesh_->getdV();
         N_ = real_mesh_->getNumDataPoints();
@@ -1897,6 +2110,8 @@ public:
         checkCuda(cudaStreamCreate(&stream_), "cudaStreamCreate(Coulomb solver)");
         checkCublas(cublasCreate(&cublas_), "cublasCreate(Coulomb solver)");
         checkCublas(cublasSetStream(cublas_, stream_), "cublasSetStream(Coulomb solver)");
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank_);
+        timing_enabled_ = (rank_ == 0) && wo_timing::timingEnabledFromEnv(false);
 
         if (Q_ > 0) {
             std::vector<double> h_qx(Q_, 0.0);
@@ -1929,8 +2144,8 @@ public:
 
     ~CoulombGpuSolver() override
     {
-        freeSameBandCache(c_cache_);
-        freeSameBandCache(v_cache_);
+        c_cache_.clear();
+        v_cache_.clear();
         release_pre_fft_density_gpu_workspace();
         if (cublas_ != nullptr) {
             cublasDestroy(cublas_);
@@ -1953,6 +2168,20 @@ public:
         }
 
         omp_set_num_threads(static_cast<int>(numInnerThreads));
+        SolverStageTimingsMs timings{};
+        auto time_gpu_stage = [&](double& out_ms, auto&& fn, const char* sync_label) {
+            const auto t0 = std::chrono::steady_clock::now();
+            fn();
+            checkCuda(cudaStreamSynchronize(stream_), sync_label);
+            const auto t1 = std::chrono::steady_clock::now();
+            out_ms += elapsed_ms(t0, t1);
+        };
+        auto time_copy_stage = [&](double& out_ms, auto&& fn) {
+            const auto t0 = std::chrono::steady_clock::now();
+            fn();
+            const auto t1 = std::chrono::steady_clock::now();
+            out_ms += elapsed_ms(t0, t1);
+        };
 
         struct TaskData {
             int integral_index = -1;
@@ -2000,8 +2229,8 @@ public:
         const std::vector<Density_descr> c_required(c_required_set.begin(), c_required_set.end());
         const std::vector<Density_descr> v_required(v_required_set.begin(), v_required_set.end());
 
-        ensure_same_band_cache(c_required, c_cache_, cWannMap);
-        ensure_same_band_cache(v_required, v_cache_, vWannMap);
+        ensure_same_band_cache(c_required, c_cache_, cWannMap, &timings);
+        ensure_same_band_cache(v_required, v_cache_, vWannMap, &timings);
 
         std::map<std::pair<Density_descr, Density_descr>, std::vector<int>, DensityPairLess> grouped{};
         for (size_t i = 0; i < tasks.size(); ++i) {
@@ -2015,8 +2244,6 @@ public:
                     v_cache_.at(t.v_dens),
                     rd_to_cart_shift(unitcell_T, t.RD));
             }
-            freeSameBandCache(c_cache_);
-            freeSameBandCache(v_cache_);
             return;
         }
 
@@ -2041,106 +2268,115 @@ public:
 
             DeviceBuffer<double> d_shifts{};
             d_shifts.allocate(h_shifts.size(), "cudaMalloc(Coulomb shifts)");
-            checkCuda(
-                cudaMemcpyAsync(
-                    d_shifts.get(),
-                    h_shifts.data(),
-                    sizeof(double) * h_shifts.size(),
-                    cudaMemcpyHostToDevice,
-                    stream_),
-                "copy Coulomb shifts");
+            time_copy_stage(timings.host_device_copy, [&]() {
+                checkCuda(
+                    cudaMemcpyAsync(
+                        d_shifts.get(),
+                        h_shifts.data(),
+                        sizeof(double) * h_shifts.size(),
+                        cudaMemcpyHostToDevice,
+                        stream_),
+                    "copy Coulomb shifts");
+                checkCuda(cudaStreamSynchronize(stream_), "sync Coulomb shifts copy");
+            });
 
             DeviceBuffer<cufftDoubleComplex> d_spectrum{};
             d_spectrum.allocate(Q_, "cudaMalloc(Coulomb spectrum)");
             const int blocks_q = static_cast<int>((Q_ + threads - 1) / threads);
-            build_coulomb_spectrum_kernel<<<blocks_q, threads, 0, stream_>>>(
-                    c_entry.fft_aux,
-                    v_entry.fft_aux,
-                d_qx_.get(),
-                d_qy_.get(),
-                d_qz_.get(),
-                d_vq_.get(),
-                Q_,
-                dV_,
-                invN,
-                c_entry.charge,
-                c_entry.x,
-                c_entry.y,
-                c_entry.z,
-                c_entry.alpha,
-                v_entry.charge,
-                v_entry.x,
-                v_entry.y,
-                v_entry.z,
-                v_entry.alpha,
-                origin_[0],
-                origin_[1],
-                origin_[2],
-                d_spectrum.get());
-            checkCuda(cudaGetLastError(), "build_coulomb_spectrum_kernel");
+            time_gpu_stage(timings.contraction, [&]() {
+                build_coulomb_spectrum_kernel<<<blocks_q, threads, 0, stream_>>>(
+                        c_entry.fft_aux,
+                        v_entry.fft_aux,
+                    d_qx_.get(),
+                    d_qy_.get(),
+                    d_qz_.get(),
+                    d_vq_.get(),
+                    Q_,
+                    dV_,
+                    invN,
+                    c_entry.charge,
+                    c_entry.x,
+                    c_entry.y,
+                    c_entry.z,
+                    c_entry.alpha,
+                    v_entry.charge,
+                    v_entry.x,
+                    v_entry.y,
+                    v_entry.z,
+                    v_entry.alpha,
+                    origin_[0],
+                    origin_[1],
+                    origin_[2],
+                    d_spectrum.get());
+                checkCuda(cudaGetLastError(), "build_coulomb_spectrum_kernel");
+            }, "sync Coulomb spectrum");
 
             DeviceBuffer<cufftDoubleComplex> d_shell_values{};
             d_shell_values.allocate(ns, "cudaMalloc(Coulomb shell values)");
 
             const bool use_gemm = (ns >= 16);
-            if (use_gemm) {
-                DeviceBuffer<cufftDoubleComplex> d_phase{};
-                d_phase.allocate(static_cast<size_t>(Q_) * static_cast<size_t>(ns), "cudaMalloc(Coulomb phase)");
-                const size_t total_phase = static_cast<size_t>(Q_) * static_cast<size_t>(ns);
-                const int blocks_phase = static_cast<int>((total_phase + threads - 1) / threads);
-                build_phase_matrix_kernel<<<blocks_phase, threads, 0, stream_>>>(
-                    d_qx_.get(),
-                    d_qy_.get(),
-                    d_qz_.get(),
-                    d_shifts.get(),
-                    Q_,
-                    ns,
-                    d_phase.get());
-                checkCuda(cudaGetLastError(), "build_phase_matrix_kernel");
-
-                const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-                const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-
-                checkCublas(
-                    cublasZgemm(
-                        cublas_,
-                        CUBLAS_OP_N,
-                        CUBLAS_OP_N,
-                        1,
+            time_gpu_stage(timings.contraction, [&]() {
+                if (use_gemm) {
+                    DeviceBuffer<cufftDoubleComplex> d_phase{};
+                    d_phase.allocate(static_cast<size_t>(Q_) * static_cast<size_t>(ns), "cudaMalloc(Coulomb phase)");
+                    const size_t total_phase = static_cast<size_t>(Q_) * static_cast<size_t>(ns);
+                    const int blocks_phase = static_cast<int>((total_phase + threads - 1) / threads);
+                    build_phase_matrix_kernel<<<blocks_phase, threads, 0, stream_>>>(
+                        d_qx_.get(),
+                        d_qy_.get(),
+                        d_qz_.get(),
+                        d_shifts.get(),
+                        Q_,
                         ns,
+                        d_phase.get());
+                    checkCuda(cudaGetLastError(), "build_phase_matrix_kernel");
+
+                    const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+                    const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+
+                    checkCublas(
+                        cublasZgemm(
+                            cublas_,
+                            CUBLAS_OP_N,
+                            CUBLAS_OP_N,
+                            1,
+                            ns,
+                            Q_,
+                            &alpha,
+                            reinterpret_cast<const cuDoubleComplex*>(d_spectrum.get()),
+                            1,
+                            reinterpret_cast<const cuDoubleComplex*>(d_phase.get()),
+                            Q_,
+                            &beta,
+                            reinterpret_cast<cuDoubleComplex*>(d_shell_values.get()),
+                            1),
+                        "cublasZgemm(Coulomb shell)");
+                } else {
+                    fused_coulomb_shell_dot_kernel<<<ns, threads, sizeof(double) * threads * 2, stream_>>>(
+                        d_spectrum.get(),
+                        d_qx_.get(),
+                        d_qy_.get(),
+                        d_qz_.get(),
+                        d_shifts.get(),
                         Q_,
-                        &alpha,
-                        reinterpret_cast<const cuDoubleComplex*>(d_spectrum.get()),
-                        1,
-                        reinterpret_cast<const cuDoubleComplex*>(d_phase.get()),
-                        Q_,
-                        &beta,
-                        reinterpret_cast<cuDoubleComplex*>(d_shell_values.get()),
-                        1),
-                    "cublasZgemm(Coulomb shell)");
-            } else {
-                fused_coulomb_shell_dot_kernel<<<ns, threads, sizeof(double) * threads * 2, stream_>>>(
-                    d_spectrum.get(),
-                    d_qx_.get(),
-                    d_qy_.get(),
-                    d_qz_.get(),
-                    d_shifts.get(),
-                    Q_,
-                    ns,
-                    d_shell_values.get());
-                checkCuda(cudaGetLastError(), "fused_coulomb_shell_dot_kernel");
-            }
+                        ns,
+                        d_shell_values.get());
+                    checkCuda(cudaGetLastError(), "fused_coulomb_shell_dot_kernel");
+                }
+            }, "sync Coulomb shell contraction");
 
             std::vector<cufftDoubleComplex> h_shell_values(static_cast<size_t>(ns));
-            checkCuda(
-                cudaMemcpyAsync(
-                    h_shell_values.data(),
-                    d_shell_values.get(),
-                    sizeof(cufftDoubleComplex) * static_cast<size_t>(ns),
-                    cudaMemcpyDeviceToHost,
-                    stream_),
-                "copy Coulomb shell values");
-            checkCuda(cudaStreamSynchronize(stream_), "sync Coulomb shell values");
+            time_copy_stage(timings.host_device_copy, [&]() {
+                checkCuda(
+                    cudaMemcpyAsync(
+                        h_shell_values.data(),
+                        d_shell_values.get(),
+                        sizeof(cufftDoubleComplex) * static_cast<size_t>(ns),
+                        cudaMemcpyDeviceToHost,
+                        stream_),
+                    "copy Coulomb shell values");
+                checkCuda(cudaStreamSynchronize(stream_), "sync Coulomb shell values");
+            });
 
             for (int s = 0; s < ns; ++s) {
                 const double analytic = analytic_i4(c_entry, v_entry, shift_cache[s]);
@@ -2153,10 +2389,7 @@ public:
             }
         }
 
-        // Keep GPU memory bounded on small cards by limiting cache lifetime
-        // to one scheduler batch.
-        freeSameBandCache(c_cache_);
-        freeSameBandCache(v_cache_);
+        maybe_print_timings(timings, tasks.size());
     }
 
 private:
@@ -2172,17 +2405,36 @@ private:
 
     void ensure_same_band_cache(
         const std::vector<Density_descr>& required,
-        std::map<Density_descr, SameBandFftCacheEntry>& cache,
-        const std::map<int, WannierFunction>& wann_map)
+        SameBandPersistentCache& cache,
+        const std::map<int, WannierFunction>& wann_map,
+        SolverStageTimingsMs* timings)
     {
         SameBandCacheBuildConfig cfg{};
         cfg.need_aux_fft = true;
         cfg.need_raw_fft = keep_dual_spectral_;
         cfg.keep_dual_spectral = keep_dual_spectral_;
         cfg.wrap_aux = wrap_aux_;
-        cfg.enable_timing = false;
-        cfg.max_cache_entries = max_cache_entries_;
-        ensure_same_band_cache_entries(required, cache, wann_map, fft_plans_, stream_, N_, cfg, nullptr);
+        cfg.enable_timing = timing_enabled_;
+        ensure_same_band_cache_entries(required, cache, wann_map, fft_plans_, stream_, N_, cfg, timings);
+    }
+
+    void maybe_print_timings(const SolverStageTimingsMs& t, size_t n_tasks) const
+    {
+        if (!timing_enabled_) {
+            return;
+        }
+        const double total = t.density_build + t.fft + t.contraction + t.host_device_copy;
+        std::cout
+            << "\n[Timing][GPU Coulomb] tasks=" << n_tasks
+            << " density_build_ms=" << t.density_build
+            << " density_materialization_ms=" << t.density_materialization
+            << " auxiliary_build_ms=" << t.auxiliary_build
+            << " auxiliary_subtraction_ms=" << t.auxiliary_subtraction
+            << " fft_ms=" << t.fft
+            << " contraction_ms=" << t.contraction
+            << " host_device_copy_ms=" << t.host_device_copy
+            << " total_ms=" << total
+            << std::endl;
     }
 
     const double points_per_std_ = 2.0;
@@ -2212,11 +2464,12 @@ private:
     DeviceBuffer<double> d_qz_{};
     DeviceBuffer<double> d_vq_{};
 
-    std::map<Density_descr, SameBandFftCacheEntry> c_cache_{};
-    std::map<Density_descr, SameBandFftCacheEntry> v_cache_{};
+    SameBandPersistentCache c_cache_;
+    SameBandPersistentCache v_cache_;
 
+    int rank_ = 0;
+    bool timing_enabled_ = false;
     const bool keep_dual_spectral_ = dual_spectral_enabled_from_env(true);
-    const size_t max_cache_entries_ = 4096;
 };
 
 class YukawaGpuSolver final : public Solver
@@ -2237,7 +2490,9 @@ public:
           vMeanDensity_(vMeanDensity),
           cMeanDensity_(cMeanDensity),
           relativePermittivity_(relativePermittivity),
-          screeningAlpha_(screeningAlpha)
+          screeningAlpha_(screeningAlpha),
+          c_cache_(same_band_cache_limit_bytes_from_env()),
+          v_cache_(same_band_cache_limit_bytes_from_env())
     {
         if (!check_maps(vWannMap, vMeanDensity_) || !check_maps(cWannMap, cMeanDensity_)) {
             throw std::runtime_error("MeanDensity maps are not compatible with Wannier maps (GPU Yukawa).");
@@ -2282,8 +2537,8 @@ public:
 
     ~YukawaGpuSolver() override
     {
-        freeSameBandCache(c_cache_);
-        freeSameBandCache(v_cache_);
+        c_cache_.clear();
+        v_cache_.clear();
         release_pre_fft_density_gpu_workspace();
         if (cublas_ != nullptr) {
             cublasDestroy(cublas_);
@@ -2367,8 +2622,6 @@ public:
             for (const auto& t : tasks) {
                 integrals[t.integral_index].value = 0.0;
             }
-            freeSameBandCache(c_cache_);
-            freeSameBandCache(v_cache_);
             maybe_print_timings(timings, tasks.size());
             return;
         }
@@ -2515,9 +2768,6 @@ public:
             }
         }
 
-        freeSameBandCache(c_cache_);
-        freeSameBandCache(v_cache_);
-
         maybe_print_timings(timings, tasks.size());
     }
 
@@ -2559,7 +2809,7 @@ private:
 
     void ensure_same_band_cache(
         const std::vector<Density_descr>& required,
-        std::map<Density_descr, SameBandFftCacheEntry>& cache,
+        SameBandPersistentCache& cache,
         const std::map<int, WannierFunction>& wann_map,
         SolverStageTimingsMs* timings)
     {
@@ -2569,7 +2819,6 @@ private:
         cfg.keep_dual_spectral = keep_dual_spectral_;
         cfg.wrap_aux = true;
         cfg.enable_timing = timing_enabled_;
-        cfg.max_cache_entries = max_cache_entries_;
         ensure_same_band_cache_entries(required, cache, wann_map, fft_plans_, stream_, N_, cfg, timings);
     }
 
@@ -2613,9 +2862,8 @@ private:
     DeviceBuffer<double> d_qy_{};
     DeviceBuffer<double> d_qz_{};
 
-    std::map<Density_descr, SameBandFftCacheEntry> c_cache_{};
-    std::map<Density_descr, SameBandFftCacheEntry> v_cache_{};
-    const size_t max_cache_entries_ = 4096;
+    SameBandPersistentCache c_cache_;
+    SameBandPersistentCache v_cache_;
 };
 
 }  // namespace
