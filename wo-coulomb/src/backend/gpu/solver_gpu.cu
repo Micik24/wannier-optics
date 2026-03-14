@@ -244,6 +244,7 @@ struct SameBandPersistentCacheNode
     SameBandFftCacheEntry entry{};
     size_t bytes = 0;
     size_t last_used_iteration = 0;
+    std::list<Density_descr>::iterator lru_it{};
 };
 
 class SameBandPersistentCache
@@ -301,7 +302,7 @@ public:
         if (existing != nodes_.end()) {
             total_bytes_ -= existing->second.bytes;
             release_same_band_entry(existing->second.entry);
-            lru_.remove(existing->first);
+            lru_.erase(existing->second.lru_it);
             nodes_.erase(existing);
         }
 
@@ -311,10 +312,11 @@ public:
         node.entry = std::move(entry);
         node.bytes = entry_bytes;
         node.last_used_iteration = ++iteration_counter_;
+        lru_.push_front(key);
+        node.lru_it = lru_.begin();
 
         total_bytes_ += node.bytes;
         nodes_.insert({key, std::move(node)});
-        lru_.push_front(key);
     }
 
     void clear()
@@ -332,8 +334,9 @@ private:
     void touch(std::map<Density_descr, SameBandPersistentCacheNode>::iterator it)
     {
         it->second.last_used_iteration = ++iteration_counter_;
-        lru_.remove(it->first);
-        lru_.push_front(it->first);
+        if (it->second.lru_it != lru_.begin()) {
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        }
     }
 
     void evict_until_fit(size_t bytes_needed, const std::set<Density_descr>& protected_keys)
@@ -352,7 +355,7 @@ private:
 
                 total_bytes_ -= map_it->second.bytes;
                 release_same_band_entry(map_it->second.entry);
-                lru_.remove(map_it->first);
+                lru_.erase(map_it->second.lru_it);
                 nodes_.erase(map_it);
                 evicted = true;
                 break;
@@ -2170,6 +2173,10 @@ public:
         omp_set_num_threads(static_cast<int>(numInnerThreads));
         SolverStageTimingsMs timings{};
         auto time_gpu_stage = [&](double& out_ms, auto&& fn, const char* sync_label) {
+            if (!timing_enabled_) {
+                fn();
+                return;
+            }
             const auto t0 = std::chrono::steady_clock::now();
             fn();
             checkCuda(cudaStreamSynchronize(stream_), sync_label);
@@ -2177,6 +2184,10 @@ public:
             out_ms += elapsed_ms(t0, t1);
         };
         auto time_copy_stage = [&](double& out_ms, auto&& fn) {
+            if (!timing_enabled_) {
+                fn();
+                return;
+            }
             const auto t0 = std::chrono::steady_clock::now();
             fn();
             const auto t1 = std::chrono::steady_clock::now();
@@ -2277,7 +2288,6 @@ public:
                         cudaMemcpyHostToDevice,
                         stream_),
                     "copy Coulomb shifts");
-                checkCuda(cudaStreamSynchronize(stream_), "sync Coulomb shifts copy");
             });
 
             DeviceBuffer<cufftDoubleComplex> d_spectrum{};
